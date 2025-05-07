@@ -5,65 +5,88 @@ import subprocess
 import threading
 import queue
 import os
-import shlex  # For safely splitting command strings
-import shutil  # For finding executables
-import sys  # For checking platform and exiting
-import re  # For parsing output for coloring
+import shlex
+import shutil
+import sys
+import re
+import platform
+import datetime
 
-# --- Configuration ---
-# Attempt to find executables in common paths or rely on PATH
 EXECUTABLE_PATHS = {
     'gobuster': ['/usr/bin/gobuster', '/snap/bin/gobuster', 'gobuster'],
     'nmap': ['/usr/bin/nmap', 'nmap'],
-    'sqlmap': ['/usr/share/sqlmap/sqlmap.py', 'sqlmap.py', 'sqlmap'],  # sqlmap.py might need python3
-    'nikto': ['/usr/bin/nikto', '/opt/nikto/program/nikto.pl', 'nikto.pl', 'nikto'],  # nikto.pl might need perl
+    'sqlmap': ['/usr/share/sqlmap/sqlmap.py', 'sqlmap.py', 'sqlmap'],
+    'nikto': ['/usr/bin/nikto', '/opt/nikto/program/nikto.pl', 'nikto.pl', 'nikto'],
     'john': ['/usr/sbin/john', '/opt/john/run/john', 'john']
+}
+
+COMMON_PACKAGE_NAMES = {
+    'gobuster': 'gobuster',
+    'nmap': 'nmap',
+    'sqlmap': 'sqlmap',
+    'nikto': 'nikto',
+    'john': 'johntheripper'
 }
 
 FOUND_EXECUTABLES = {}
 
 
 def find_executable(tool_name):
-    """Finds the specified executable."""
+    print(f"\n[DEBUG] Attempting to find executable for tool: {tool_name}")
     if tool_name in FOUND_EXECUTABLES and FOUND_EXECUTABLES[tool_name]:
+        print(f"[DEBUG] Found '{tool_name}' in cache: {FOUND_EXECUTABLES[tool_name]}")
         return FOUND_EXECUTABLES[tool_name]
 
     paths_to_check = EXECUTABLE_PATHS.get(tool_name, [tool_name])
+    print(f"[DEBUG] Paths to check for '{tool_name}': {paths_to_check}")
     for path_candidate in paths_to_check:
+        print(f"[DEBUG] Checking candidate for '{tool_name}': '{path_candidate}'")
+        if path_candidate == tool_name:
+            print(f"[DEBUG] Python's PATH environment variable: {os.environ.get('PATH')}")
+
         found_path = shutil.which(path_candidate)
+        print(f"[DEBUG] shutil.which('{path_candidate}') returned: '{found_path}'")
+
         if found_path:
-            # Special handling for script-based tools that might need an interpreter
+            is_executable = os.access(found_path, os.X_OK)
+            print(f"[DEBUG] Path '{found_path}' for '{tool_name}' exists. Is executable by script: {is_executable}")
+            if not is_executable:
+                print(f"[DEBUG] Path '{found_path}' is NOT marked as executable by the current user/script. Skipping.")
+                continue
+
             if tool_name == 'sqlmap' and (found_path.endswith('.py') or 'sqlmap.py' in path_candidate):
-                # Check if python3 is available
-                if shutil.which('python3'):
-                    FOUND_EXECUTABLES[tool_name] = ['python3', found_path]
-                    return ['python3', found_path]
+                python_exe = shutil.which('python3') or shutil.which('python')
+                if python_exe:
+                    print(f"[DEBUG] '{tool_name}' is a python script, {python_exe} found.")
+                    FOUND_EXECUTABLES[tool_name] = [python_exe, found_path]
+                    return FOUND_EXECUTABLES[tool_name]
                 else:
-                    continue  # Cannot run .py without python3
+                    print(f"[DEBUG] '{tool_name}' is a python script, but no python/python3 interpreter NOT found.")
+                    continue
             elif tool_name == 'nikto' and (found_path.endswith('.pl') or 'nikto.pl' in path_candidate):
-                if shutil.which('perl'):
-                    FOUND_EXECUTABLES[tool_name] = ['perl', found_path]
-                    return ['perl', found_path]
+                perl_exe = shutil.which('perl')
+                if perl_exe:
+                    print(f"[DEBUG] '{tool_name}' is a perl script, perl found.")
+                    FOUND_EXECUTABLES[tool_name] = [perl_exe, found_path]
+                    return FOUND_EXECUTABLES[tool_name]
                 else:
-                    continue  # Cannot run .pl without perl
-            FOUND_EXECUTABLES[tool_name] = [found_path]  # Store as a list for consistency
-            return [found_path]
+                    print(f"[DEBUG] '{tool_name}' is a perl script, but perl interpreter NOT found.")
+                    continue
+
+            FOUND_EXECUTABLES[tool_name] = [found_path]
+            print(f"[DEBUG] Successfully found and cached '{tool_name}' as: {FOUND_EXECUTABLES[tool_name]}")
+            return FOUND_EXECUTABLES[tool_name]
+
     FOUND_EXECUTABLES[tool_name] = None
+    print(f"[DEBUG] Failed to find '{tool_name}' after checking all candidates. Caching as None.")
     return None
 
 
-# Initialize found executables
-for tool in EXECUTABLE_PATHS.keys():
-    find_executable(tool)
+for tool_key in EXECUTABLE_PATHS.keys():
+    find_executable(tool_key)
 
-
-# --- Helper Functions ---
 
 def run_command_in_thread(args_list, output_queue, process_queue, stop_event, tool_name="Tool"):
-    """
-    Runs the command in a subprocess and puts output/errors into a queue.
-    Checks a stop_event periodically.
-    """
     process = None
     try:
         process = subprocess.Popen(
@@ -73,6 +96,7 @@ def run_command_in_thread(args_list, output_queue, process_queue, stop_event, to
             text=True,
             bufsize=1,
             universal_newlines=True,
+            errors='replace'
         )
         process_queue.put(process)
 
@@ -94,7 +118,7 @@ def run_command_in_thread(args_list, output_queue, process_queue, stop_event, to
         output_queue.put(f"ERROR: '{cmd_str}' command not found for {tool_name}.")
         output_queue.put(f"Please ensure {tool_name} is installed and in your PATH or adjust EXECUTABLE_PATHS.")
     except Exception as e:
-        output_queue.put(f"\n--- An error occurred during {tool_name} execution: {e} ---")
+        output_queue.put(f"\n--- An error occurred during {tool_name} execution: {type(e).__name__}: {e} ---")
     finally:
         if process and process.poll() is None:
             try:
@@ -102,24 +126,23 @@ def run_command_in_thread(args_list, output_queue, process_queue, stop_event, to
                 process.wait(timeout=0.5)
                 if process.poll() is None:
                     process.kill()
+                    process.wait(timeout=0.5)
             except Exception as e:
                 print(f"Error during final {tool_name} process cleanup: {e}", file=sys.stderr)
                 try:
                     output_queue.put(f"\n--- Error during final {tool_name} process cleanup: {e} ---")
                 except Exception:
                     pass
-        output_queue.put(None)  # Sentinel
-        process_queue.put(None)  # Sentinel
+        output_queue.put(None)
+        process_queue.put(None)
 
-
-# --- Main Application Class ---
 
 class PentestApp:
     def __init__(self, master):
         self.master = master
         master.title("Redboar Pentesting GUI")
-        master.geometry("950x750")
-        master.minsize(800, 650)
+        master.geometry("1000x800")
+        master.minsize(850, 700)
 
         self.style = ttk.Style()
         available_themes = self.style.theme_names()
@@ -133,23 +156,41 @@ class PentestApp:
         self.output_queue = queue.Queue()
         self.process_queue = queue.Queue()
         self.stop_event = threading.Event()
+        self.proc_thread_tool_name = "Tool"
 
-        self.current_tool_name = tk.StringVar(value="Gobuster")  # Default tool
+        self.current_tool_name = tk.StringVar(value="Gobuster")
 
+        self._create_menubar()
         self.create_widgets()
         self.update_command_preview()
+        self.on_tool_selected()
 
         master.columnconfigure(0, weight=1)
-        master.rowconfigure(1, weight=1)  # Main content area (notebook)
-        master.rowconfigure(3, weight=1)  # Output area
+        master.rowconfigure(0, weight=0)
+        master.rowconfigure(1, weight=0)
+        master.rowconfigure(2, weight=0)
+        master.rowconfigure(3, weight=1)
+        master.rowconfigure(4, weight=0)
 
-        # Check for essential tools on startup (at least Gobuster initially)
-        if not FOUND_EXECUTABLES.get('gobuster'):
-            messagebox.showerror("Error: Gobuster Not Found",
-                                 f"Gobuster executable not found! Checked paths for 'gobuster': {EXECUTABLE_PATHS['gobuster']}\n"
-                                 "Application may not function correctly for Gobuster scans.")
-        # Configure output tags
         self._configure_output_tags()
+
+    def _create_menubar(self):
+        self.menubar = tk.Menu(self.master)
+        self.master.config(menu=self.menubar)
+
+        help_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="About Redboar", command=self.show_about_dialog)
+
+    def show_about_dialog(self):
+        about_message = (
+            "Redboar Pentesting GUI\n\n"
+            "Version: 0.2.1 (Alpha)\n"
+            f"Date: {datetime.date.today().strftime('%Y-%m-%d')}\n\n"
+            "A GUI wrapper for common pentesting tools.\n"
+            "Remember to use these tools responsibly and ethically."
+        )
+        messagebox.showinfo("About Redboar", about_message)
 
     def _configure_output_tags(self):
         self.output_text.tag_configure("status_200", foreground="green")
@@ -160,70 +201,65 @@ class PentestApp:
         self.output_text.tag_configure("error", foreground="red", font=('monospace', 10, 'bold'))
         self.output_text.tag_configure("info", foreground="grey")
         self.output_text.tag_configure("success", foreground="green", font=('monospace', 10, 'bold'))
-
-        # Nmap specific
         self.output_text.tag_configure("nmap_port_open", foreground="green")
         self.output_text.tag_configure("nmap_port_closed", foreground="red")
         self.output_text.tag_configure("nmap_port_filtered", foreground="orange")
         self.output_text.tag_configure("nmap_host_up", foreground="green")
         self.output_text.tag_configure("nmap_service", foreground="blue")
-
-        # SQLMap specific
         self.output_text.tag_configure("sqlmap_vulnerable", foreground="red", font=('monospace', 10, 'bold'))
         self.output_text.tag_configure("sqlmap_info", foreground="cyan")
         self.output_text.tag_configure("sqlmap_dbms", foreground="purple")
         self.output_text.tag_configure("sqlmap_data", foreground="green")
-
-        # Nikto specific
         self.output_text.tag_configure("nikto_vuln", foreground="red", font=('monospace', 10, 'bold'))
         self.output_text.tag_configure("nikto_info", foreground="blue")
         self.output_text.tag_configure("nikto_server", foreground="purple")
-
-        # John specific
         self.output_text.tag_configure("john_cracked", foreground="green", font=('monospace', 10, 'bold'))
         self.output_text.tag_configure("john_status", foreground="grey")
+        self.output_text.tag_configure("tool_not_found_msg", foreground="red", font=('monospace', 10, 'italic'))
 
     def create_widgets(self):
-        # --- Main Tool Selection Notebook ---
         self.main_notebook = ttk.Notebook(self.master, padding="5")
-        self.main_notebook.grid(row=0, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        self.main_notebook.grid(row=0, column=0, columnspan=2, sticky="new", padx=5, pady=5)
         self.main_notebook.bind("<<NotebookTabChanged>>", self.on_tool_selected)
 
-        # Create frames for each tool
-        self.gobuster_frame = ttk.Frame(self.main_notebook, padding="10")
-        self.nmap_frame = ttk.Frame(self.main_notebook, padding="10")
-        self.sqlmap_frame = ttk.Frame(self.main_notebook, padding="10")
-        self.nikto_frame = ttk.Frame(self.main_notebook, padding="10")
-        self.john_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.tool_frames = {}
+        tool_tabs = [
+            ("Gobuster", self._create_gobuster_ui),
+            ("Nmap", self._create_nmap_ui),
+            ("SQLMap", self._create_sqlmap_ui),
+            ("Nikto", self._create_nikto_ui),
+            ("John the Ripper", self._create_john_ui)
+        ]
 
-        self.main_notebook.add(self.gobuster_frame, text=' Gobuster ')
-        self.main_notebook.add(self.nmap_frame, text=' Nmap ')
-        self.main_notebook.add(self.sqlmap_frame, text=' SQLMap ')
-        self.main_notebook.add(self.nikto_frame, text=' Nikto ')
-        self.main_notebook.add(self.john_frame, text=' John the Ripper ')
+        for name, creation_method in tool_tabs:
+            frame = ttk.Frame(self.main_notebook, padding="10")
+            self.main_notebook.add(frame, text=f' {name} ')
+            self.tool_frames[name] = frame
+            creation_method(frame)
 
-        # Populate each tool's frame
-        self._create_gobuster_ui(self.gobuster_frame)
-        self._create_nmap_ui(self.nmap_frame)
-        self._create_sqlmap_ui(self.sqlmap_frame)
-        self._create_nikto_ui(self.nikto_frame)
-        self._create_john_ui(self.john_frame)
+            not_found_label = ttk.Label(frame,
+                                        text=f"{name} executable not found. Please install it or check your PATH.",
+                                        style="tool_not_found_msg.TLabel")
+            setattr(self, f"{name.lower().replace(' ', '_').replace('-', '_')}_not_found_label", not_found_label)
 
-        # --- Command Preview ---
-        cmd_frame = ttk.Frame(self.master, padding="5 0")
-        cmd_frame.grid(row=1, column=0, sticky="ew", padx=5)
-        cmd_frame.columnconfigure(1, weight=1)
-        ttk.Label(cmd_frame, text="Command Preview:").grid(row=0, column=0, sticky="w")
+        cmd_preview_frame = ttk.Frame(self.master, padding="5 0")
+        cmd_preview_frame.grid(row=1, column=0, sticky="ew", padx=5)
+        cmd_preview_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(cmd_preview_frame, text="Command Preview:").grid(row=0, column=0, sticky="w", padx=(0, 5))
         self.cmd_preview_var = tk.StringVar()
-        cmd_entry = ttk.Entry(cmd_frame, textvariable=self.cmd_preview_var, state="readonly", font="monospace 10")
-        cmd_entry.grid(row=0, column=1, sticky="ew", padx=5)
+        cmd_entry = ttk.Entry(cmd_preview_frame, textvariable=self.cmd_preview_var, state="readonly",
+                              font="monospace 10")
+        cmd_entry.grid(row=0, column=1, sticky="ew")
 
-        # --- Progress Bar ---
+        self.copy_cmd_button = ttk.Button(cmd_preview_frame, text="Copy", command=self.copy_command_to_clipboard,
+                                          width=8)
+        self.copy_cmd_button.grid(row=0, column=2, sticky="e", padx=(5, 0))
+
         self.progress_bar = ttk.Progressbar(self.master, mode='indeterminate', length=200)
-        self.progress_bar.grid(row=2, column=0, sticky="ew", padx=5, pady=(0, 5))
-        self.progress_bar.grid_remove()  # Initially hidden
+        self.progress_bar.grid(row=2, column=0, sticky="ew", padx=5, pady=(5, 5))
+        self.progress_bar.grid_remove()
 
-        # --- Output Area ---
         output_frame = ttk.Frame(self.master, padding="5")
         output_frame.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
         output_frame.rowconfigure(0, weight=1)
@@ -232,283 +268,320 @@ class PentestApp:
         self.output_text.grid(row=0, column=0, sticky="nsew")
         self.output_text.configure(state='disabled')
 
-        # --- Control Buttons & Status ---
-        control_frame = ttk.Frame(self.master, padding="5")
+        control_frame = ttk.Frame(self.master, padding="10 5")
         control_frame.grid(row=4, column=0, sticky="ew", padx=5, pady=5)
-        control_frame.columnconfigure(4, weight=1)  # Push status label to the right
+        control_frame.columnconfigure(4, weight=1)
 
-        self.start_button = ttk.Button(control_frame, text="Start Scan", command=self.start_scan)
+        self.start_button = ttk.Button(control_frame, text="Start Scan", command=self.start_scan, width=12)
         self.start_button.grid(row=0, column=0, padx=5)
-        self.stop_button = ttk.Button(control_frame, text="Stop Scan", command=self.stop_scan, state=tk.DISABLED)
+        self.stop_button = ttk.Button(control_frame, text="Stop Scan", command=self.stop_scan, state=tk.DISABLED,
+                                      width=12)
         self.stop_button.grid(row=0, column=1, padx=5)
-        self.clear_button = ttk.Button(control_frame, text="Clear Output", command=self.clear_output)
+        self.clear_button = ttk.Button(control_frame, text="Clear Output", command=self.clear_output, width=12)
         self.clear_button.grid(row=0, column=2, padx=5)
-        self.export_button = ttk.Button(control_frame, text="Export Output", command=self.export_results)
+        self.export_button = ttk.Button(control_frame, text="Export Output", command=self.export_results, width=12)
         self.export_button.grid(row=0, column=3, padx=5)
         self.status_label = ttk.Label(control_frame, text="Status: Idle", anchor="e")
         self.status_label.grid(row=0, column=4, sticky="e", padx=5)
-        self.exit_button = ttk.Button(control_frame, text="Exit", command=self.master.quit)
-        self.exit_button.grid(row=0, column=5, padx=5)
+
+    def copy_command_to_clipboard(self):
+        command = self.cmd_preview_var.get()
+        if command and not command.startswith("Error:"):
+            self.master.clipboard_clear()
+            self.master.clipboard_append(command)
+            self.status_label.config(text="Status: Command copied to clipboard!")
+            self.master.after(2000, lambda: self.status_label.config(
+                text=f"Status: Idle" if self.stop_button['state'] == tk.DISABLED else self.status_label.cget("text")))
+        elif command.startswith("Error:"):
+            messagebox.showwarning("Copy Error", "Cannot copy an error message from command preview.")
+        else:
+            messagebox.showinfo("Copy Info", "No command to copy.")
 
     def on_tool_selected(self, event=None):
-        selected_tab_index = self.main_notebook.index(self.main_notebook.select())
-        tool_name = self.main_notebook.tab(selected_tab_index, "text").strip()
-        self.current_tool_name.set(tool_name)
+        try:
+            selected_tab_index = self.main_notebook.index(self.main_notebook.select())
+            tool_name_display = self.main_notebook.tab(selected_tab_index, "text").strip()
+        except tk.TclError:
+            tool_name_display = self.current_tool_name.get()
+
+        self.current_tool_name.set(tool_name_display)
         self.update_command_preview()
-        # Reset status if a tool was running and user switches tabs
-        if self.stop_button['state'] == tk.NORMAL:  # if scan was running
-            # self.stop_scan() # Optionally stop scan on tab switch, or just update UI
-            self.status_label.config(text=f"Status: Switched tool while {self.proc_thread_tool_name} was running.")
-            # Keep stop button active if a process is truly running.
-            # For simplicity now, we'll assume user stops before switching or it's a visual switch.
 
-    def _create_shared_options_frame(self, parent_frame, tool_vars_prefix):
-        """Helper to create common 'Threads' and 'Timeout' options"""
-        options_frame = ttk.Frame(parent_frame, padding="5")
-        options_frame.grid(row=10, column=0, columnspan=3, sticky="ew", pady=5)  # Adjusted row
+        tool_key_attr = tool_name_display.lower().replace(' ', '_').replace('-', '_')
+        not_found_label_attr = f"{tool_key_attr}_not_found_label"
 
-        # Threads
-        ttk.Label(options_frame, text="Threads:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        setattr(self, f"{tool_vars_prefix}_threads_var", tk.StringVar(value='10'))
-        threads_entry = ttk.Entry(options_frame, textvariable=getattr(self, f"{tool_vars_prefix}_threads_var"), width=5)
-        threads_entry.grid(row=0, column=1, sticky="w", padx=5, pady=2)
-        threads_entry.bind("<KeyRelease>", self.update_command_preview)
+        for tool_frame_name_iter in self.tool_frames.keys():
+            key_iter = tool_frame_name_iter.lower().replace(' ', '_').replace('-', '_')
+            label_attr_name_iter = f"{key_iter}_not_found_label"
+            if hasattr(self, label_attr_name_iter):
+                getattr(self, label_attr_name_iter).grid_remove()
 
-        # Timeout (example, adapt per tool)
-        ttk.Label(options_frame, text="Timeout (e.g., 10s, 1m):").grid(row=0, column=2, sticky="w", padx=5, pady=2)
-        setattr(self, f"{tool_vars_prefix}_timeout_var", tk.StringVar(value='10s'))
-        timeout_entry = ttk.Entry(options_frame, textvariable=getattr(self, f"{tool_vars_prefix}_timeout_var"), width=8)
-        timeout_entry.grid(row=0, column=3, sticky="w", padx=5, pady=2)
-        timeout_entry.bind("<KeyRelease>", self.update_command_preview)
-        return options_frame
+        tool_executable_key = tool_name_display.lower().replace(" ", "")
+        if tool_executable_key == "johntheripper": tool_executable_key = "john"
 
-    # --- Gobuster UI ---
+        if not FOUND_EXECUTABLES.get(tool_executable_key):
+            self.start_button.config(state=tk.DISABLED)
+            if hasattr(self, not_found_label_attr):
+                getattr(self, not_found_label_attr).grid(row=0, column=0, columnspan=3, sticky="new", pady=(0, 10),
+                                                         padx=5)
+            self.status_label.config(text=f"Status: {tool_name_display} not found.")
+        else:
+            if not (self.proc_thread and self.proc_thread.is_alive()):
+                self.start_button.config(state=tk.NORMAL)
+                self.status_label.config(text="Status: Idle")
+            if hasattr(self, not_found_label_attr):
+                getattr(self, not_found_label_attr).grid_remove()
+
     def _create_gobuster_ui(self, parent_frame):
         parent_frame.columnconfigure(1, weight=1)
-        ttk.Label(parent_frame, text="Mode:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(parent_frame, text="Mode:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         self.gobuster_modes = {'Directory/File': 'dir', 'DNS Subdomain': 'dns', 'Virtual Host': 'vhost'}
         self.gobuster_current_mode_var = tk.StringVar(value='Directory/File')
         self.gobuster_mode_combo = ttk.Combobox(parent_frame, textvariable=self.gobuster_current_mode_var,
                                                 values=list(self.gobuster_modes.keys()), state="readonly", width=15)
-        self.gobuster_mode_combo.grid(row=0, column=1, sticky="w", padx=5, pady=2)
+        self.gobuster_mode_combo.grid(row=1, column=1, sticky="w", padx=5, pady=2)
         self.gobuster_mode_combo.bind("<<ComboboxSelected>>", self.update_command_preview)
 
-        ttk.Label(parent_frame, text="Target URL/Domain:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(parent_frame, text="Target URL/Domain:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
         self.gobuster_target_var = tk.StringVar()
         self.gobuster_target_entry = ttk.Entry(parent_frame, textvariable=self.gobuster_target_var, width=50)
-        self.gobuster_target_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
+        self.gobuster_target_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
         self.gobuster_target_entry.bind("<KeyRelease>", self.update_command_preview)
 
-        ttk.Label(parent_frame, text="Wordlist:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(parent_frame, text="Wordlist:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
         self.gobuster_wordlist_var = tk.StringVar()
         self.gobuster_wordlist_entry = ttk.Entry(parent_frame, textvariable=self.gobuster_wordlist_var, width=50)
-        self.gobuster_wordlist_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=2)
+        self.gobuster_wordlist_entry.grid(row=3, column=1, sticky="ew", padx=5, pady=2)
         self.gobuster_wordlist_entry.bind("<KeyRelease>", self.update_command_preview)
         self.gobuster_browse_button = ttk.Button(parent_frame, text="Browse...",
                                                  command=lambda: self.browse_file(self.gobuster_wordlist_var))
-        self.gobuster_browse_button.grid(row=2, column=2, sticky="e", padx=5, pady=2)
+        self.gobuster_browse_button.grid(row=3, column=2, sticky="e", padx=5, pady=2)
 
-        # Gobuster specific options (simplified from original, add tabs if needed)
-        g_options_frame = ttk.Frame(parent_frame, padding="5")
-        g_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew")
+        g_options_frame = ttk.LabelFrame(parent_frame, text="Options", padding="10")
+        g_options_frame.grid(row=4, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
 
         self.gobuster_threads_var = tk.StringVar(value='10')
-        ttk.Label(g_options_frame, text="Threads (-t):").grid(row=0, column=0, sticky="w")
-        ttk.Entry(g_options_frame, textvariable=self.gobuster_threads_var, width=5).grid(row=0, column=1, sticky="w")
+        ttk.Label(g_options_frame, text="Threads (-t):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ttk.Entry(g_options_frame, textvariable=self.gobuster_threads_var, width=5).grid(row=0, column=1, sticky="w",
+                                                                                         padx=5, pady=2)
 
         self.gobuster_extensions_var = tk.StringVar()
-        ttk.Label(g_options_frame, text="Extensions (-x, comma separated):").grid(row=1, column=0, sticky="w")
+        ttk.Label(g_options_frame, text="Extensions (-x):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         ttk.Entry(g_options_frame, textvariable=self.gobuster_extensions_var, width=20).grid(row=1, column=1,
-                                                                                             sticky="w")
+                                                                                             sticky="w", padx=5, pady=2)
+        ttk.Label(g_options_frame, text="(e.g. php,txt,html)").grid(row=1, column=2, sticky="w", padx=5, pady=2)
 
         self.gobuster_status_codes_var = tk.StringVar(value='200,204,301,302,307,401,403')
-        ttk.Label(g_options_frame, text="Include Codes (-s):").grid(row=2, column=0, sticky="w")
+        ttk.Label(g_options_frame, text="Include Codes (-s):").grid(row=2, column=0, sticky="w", padx=5, pady=2)
         ttk.Entry(g_options_frame, textvariable=self.gobuster_status_codes_var, width=30).grid(row=2, column=1,
-                                                                                               sticky="w")
+                                                                                               columnspan=2,
+                                                                                               sticky="ew", padx=5,
+                                                                                               pady=2)
 
-        # Bind all relevant gobuster var changes to update preview
         for var in [self.gobuster_threads_var, self.gobuster_extensions_var, self.gobuster_status_codes_var]:
             var.trace_add("write", lambda *args: self.update_command_preview())
 
-    # --- Nmap UI ---
     def _create_nmap_ui(self, parent_frame):
         parent_frame.columnconfigure(1, weight=1)
-        ttk.Label(parent_frame, text="Target(s):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(parent_frame, text="Target(s):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         self.nmap_target_var = tk.StringVar()
         self.nmap_target_entry = ttk.Entry(parent_frame, textvariable=self.nmap_target_var, width=50)
-        self.nmap_target_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
+        self.nmap_target_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
         self.nmap_target_entry.bind("<KeyRelease>", self.update_command_preview)
 
-        ttk.Label(parent_frame, text="Ports (e.g., 22,80,443 or 1-1000):").grid(row=1, column=0, sticky="w", padx=5,
-                                                                                pady=2)
+        ttk.Label(parent_frame, text="Ports:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
         self.nmap_ports_var = tk.StringVar()
         self.nmap_ports_entry = ttk.Entry(parent_frame, textvariable=self.nmap_ports_var, width=30)
-        self.nmap_ports_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=2)
+        self.nmap_ports_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=2)
         self.nmap_ports_entry.bind("<KeyRelease>", self.update_command_preview)
+        ttk.Label(parent_frame, text="(e.g. 22,80 or 1-1000 or T:21-23,U:53)").grid(row=2, column=2, sticky="w", padx=5,
+                                                                                    pady=2)
 
-        n_options_frame = ttk.Frame(parent_frame, padding="5")
-        n_options_frame.grid(row=2, column=0, columnspan=3, sticky="ew")
+        n_options_frame = ttk.LabelFrame(parent_frame, text="Scan Types & Options", padding="10")
+        n_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        n_options_frame.columnconfigure(1, weight=1)
 
         self.nmap_scan_type_vars = {}
         scan_types = {
-            "-sS (TCP SYN)": tk.BooleanVar(value=True),
-            "-sT (TCP Connect)": tk.BooleanVar(),
-            "-sU (UDP)": tk.BooleanVar(),
-            "-sA (TCP ACK)": tk.BooleanVar(),
+            "-sS (TCP SYN)": tk.BooleanVar(value=True), "-sT (TCP Connect)": tk.BooleanVar(),
+            "-sU (UDP)": tk.BooleanVar(), "-sA (TCP ACK)": tk.BooleanVar(),
         }
-        r = 0
+        r, c = 0, 0
         for text, var in scan_types.items():
             self.nmap_scan_type_vars[text] = var
-            ttk.Checkbutton(n_options_frame, text=text, variable=var, command=self.update_command_preview).grid(row=r,
-                                                                                                                column=0,
-                                                                                                                sticky="w")
-            r += 1
+            cb = ttk.Checkbutton(n_options_frame, text=text, variable=var, command=self.update_command_preview)
+            cb.grid(row=r, column=c, sticky="w", padx=5, pady=2)
+            c += 1
+            if c >= 2:
+                c = 0
+                r += 1
+
+        current_row_st = r
+        current_col_st = c
 
         self.nmap_ping_scan_var = tk.BooleanVar()
-        ttk.Checkbutton(n_options_frame, text="-sn (Ping Scan - No Ports)", variable=self.nmap_ping_scan_var,
-                        command=self.update_command_preview).grid(row=r, column=0, sticky="w")
-        r += 1
-        self.nmap_no_ping_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(n_options_frame, text="-Pn (Treat all hosts as online)", variable=self.nmap_no_ping_var,
-                        command=self.update_command_preview).grid(row=r, column=0, sticky="w")
+        cb_ping = ttk.Checkbutton(n_options_frame, text="-sn (Ping Scan)", variable=self.nmap_ping_scan_var,
+                                  command=self.update_command_preview)
+        cb_ping.grid(row=current_row_st, column=current_col_st, sticky="w", padx=5, pady=2)
+        current_col_st += 1
+        if current_col_st >= 2: current_col_st = 0; current_row_st += 1
 
-        n_detect_frame = ttk.Frame(parent_frame, padding="5")
-        n_detect_frame.grid(row=3, column=0, columnspan=3, sticky="ew")
+        self.nmap_no_ping_var = tk.BooleanVar(value=True)
+        cb_noping = ttk.Checkbutton(n_options_frame, text="-Pn (No Ping)", variable=self.nmap_no_ping_var,
+                                    command=self.update_command_preview)
+        cb_noping.grid(row=current_row_st, column=current_col_st, sticky="w", padx=5, pady=2)
+
+        n_detect_frame = ttk.LabelFrame(parent_frame, text="Detection & Output", padding="10")
+        n_detect_frame.grid(row=4, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        n_detect_frame.columnconfigure(1, weight=1)
+
         self.nmap_os_detect_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(n_detect_frame, text="-O (Enable OS detection)", variable=self.nmap_os_detect_var,
-                        command=self.update_command_preview).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(n_detect_frame, text="-O (OS detection)", variable=self.nmap_os_detect_var,
+                        command=self.update_command_preview).grid(row=0, column=0, sticky="w", padx=5, pady=2)
         self.nmap_version_detect_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(n_detect_frame, text="-sV (Service/Version detection)", variable=self.nmap_version_detect_var,
-                        command=self.update_command_preview).grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(n_detect_frame, text="-sV (Service/Version)", variable=self.nmap_version_detect_var,
+                        command=self.update_command_preview).grid(row=0, column=1, sticky="w", padx=5, pady=2)
+
         self.nmap_fast_scan_var = tk.BooleanVar()
-        ttk.Checkbutton(n_detect_frame, text="-F (Fast mode - fewer ports)", variable=self.nmap_fast_scan_var,
-                        command=self.update_command_preview).grid(row=1, column=0, sticky="w")
+        ttk.Checkbutton(n_detect_frame, text="-F (Fast mode)", variable=self.nmap_fast_scan_var,
+                        command=self.update_command_preview).grid(row=1, column=0, sticky="w", padx=5, pady=2)
         self.nmap_verbose_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(n_detect_frame, text="-v (Verbose)", variable=self.nmap_verbose_var,
-                        command=self.update_command_preview).grid(row=1, column=1, sticky="w")
+                        command=self.update_command_preview).grid(row=1, column=1, sticky="w", padx=5, pady=2)
 
-    # --- SQLMap UI ---
     def _create_sqlmap_ui(self, parent_frame):
         parent_frame.columnconfigure(1, weight=1)
-        ttk.Label(parent_frame, text="Target URL (-u):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(parent_frame, text="Target URL (-u):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         self.sqlmap_target_var = tk.StringVar()
         self.sqlmap_target_entry = ttk.Entry(parent_frame, textvariable=self.sqlmap_target_var, width=50)
-        self.sqlmap_target_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
+        self.sqlmap_target_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
         self.sqlmap_target_entry.bind("<KeyRelease>", self.update_command_preview)
 
-        s_options_frame = ttk.Frame(parent_frame, padding="5")
-        s_options_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
+        s_options_frame = ttk.LabelFrame(parent_frame, text="Options", padding="10")
+        s_options_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
 
         self.sqlmap_batch_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(s_options_frame, text="--batch (Non-interactive)", variable=self.sqlmap_batch_var,
-                        command=self.update_command_preview).grid(row=0, column=0, sticky="w")
+                        command=self.update_command_preview).grid(row=0, column=0, columnspan=2, sticky="w", padx=5,
+                                                                  pady=2)
+
+        s_enum_frame = ttk.LabelFrame(s_options_frame, text="Enumeration", padding="5")
+        s_enum_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
 
         self.sqlmap_dbs_var = tk.BooleanVar()
-        ttk.Checkbutton(s_options_frame, text="--dbs (Enumerate databases)", variable=self.sqlmap_dbs_var,
-                        command=self.update_command_preview).grid(row=1, column=0, sticky="w")
+        ttk.Checkbutton(s_enum_frame, text="--dbs (Databases)", variable=self.sqlmap_dbs_var,
+                        command=self.update_command_preview).grid(row=0, column=0, sticky="w", padx=5, pady=2)
         self.sqlmap_current_db_var = tk.BooleanVar()
-        ttk.Checkbutton(s_options_frame, text="--current-db (Retrieve current DB)", variable=self.sqlmap_current_db_var,
-                        command=self.update_command_preview).grid(row=1, column=1, sticky="w")
-
+        ttk.Checkbutton(s_enum_frame, text="--current-db (Current DB)", variable=self.sqlmap_current_db_var,
+                        command=self.update_command_preview).grid(row=0, column=1, sticky="w", padx=5, pady=2)
         self.sqlmap_tables_var = tk.BooleanVar()
-        ttk.Checkbutton(s_options_frame, text="--tables (Enumerate tables for DB)", variable=self.sqlmap_tables_var,
-                        command=self.update_command_preview).grid(row=2, column=0, sticky="w")
+        ttk.Checkbutton(s_enum_frame, text="--tables (Tables)", variable=self.sqlmap_tables_var,
+                        command=self.update_command_preview).grid(row=1, column=0, sticky="w", padx=5, pady=2)
         self.sqlmap_dump_var = tk.BooleanVar()
-        ttk.Checkbutton(s_options_frame, text="--dump (Dump table entries)", variable=self.sqlmap_dump_var,
-                        command=self.update_command_preview).grid(row=2, column=1, sticky="w")
+        ttk.Checkbutton(s_enum_frame, text="--dump (Dump Data)", variable=self.sqlmap_dump_var,
+                        command=self.update_command_preview).grid(row=1, column=1, sticky="w", padx=5, pady=2)
 
-        ttk.Label(s_options_frame, text="Specify DB (-D):").grid(row=3, column=0, sticky="w")
+        ttk.Label(s_enum_frame, text="DB (-D):").grid(row=2, column=0, sticky="w", padx=5, pady=2)
         self.sqlmap_db_name_var = tk.StringVar()
-        ttk.Entry(s_options_frame, textvariable=self.sqlmap_db_name_var, width=15).grid(row=3, column=1, sticky="w")
+        ttk.Entry(s_enum_frame, textvariable=self.sqlmap_db_name_var, width=15).grid(row=2, column=1, sticky="w",
+                                                                                     padx=5, pady=2)
         self.sqlmap_db_name_var.trace_add("write", lambda *args: self.update_command_preview())
 
-        ttk.Label(s_options_frame, text="Specify Table (-T):").grid(row=4, column=0, sticky="w")
+        ttk.Label(s_enum_frame, text="Table (-T):").grid(row=3, column=0, sticky="w", padx=5, pady=2)
         self.sqlmap_table_name_var = tk.StringVar()
-        ttk.Entry(s_options_frame, textvariable=self.sqlmap_table_name_var, width=15).grid(row=4, column=1, sticky="w")
+        ttk.Entry(s_enum_frame, textvariable=self.sqlmap_table_name_var, width=15).grid(row=3, column=1, sticky="w",
+                                                                                        padx=5, pady=2)
         self.sqlmap_table_name_var.trace_add("write", lambda *args: self.update_command_preview())
 
-        ttk.Label(s_options_frame, text="Level (1-5):").grid(row=5, column=0, sticky="w")
+        s_tuning_frame = ttk.LabelFrame(s_options_frame, text="Tuning", padding="5")
+        s_tuning_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+
+        ttk.Label(s_tuning_frame, text="Level (1-5):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
         self.sqlmap_level_var = tk.StringVar(value="1")
-        ttk.Entry(s_options_frame, textvariable=self.sqlmap_level_var, width=3).grid(row=5, column=1, sticky="w")
+        ttk.Entry(s_tuning_frame, textvariable=self.sqlmap_level_var, width=3).grid(row=0, column=1, sticky="w", padx=5,
+                                                                                    pady=2)
         self.sqlmap_level_var.trace_add("write", lambda *args: self.update_command_preview())
 
-        ttk.Label(s_options_frame, text="Risk (1-3):").grid(row=6, column=0, sticky="w")
+        ttk.Label(s_tuning_frame, text="Risk (0-3):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         self.sqlmap_risk_var = tk.StringVar(value="1")
-        ttk.Entry(s_options_frame, textvariable=self.sqlmap_risk_var, width=3).grid(row=6, column=1, sticky="w")
+        ttk.Entry(s_tuning_frame, textvariable=self.sqlmap_risk_var, width=3).grid(row=1, column=1, sticky="w", padx=5,
+                                                                                   pady=2)
         self.sqlmap_risk_var.trace_add("write", lambda *args: self.update_command_preview())
 
-    # --- Nikto UI ---
     def _create_nikto_ui(self, parent_frame):
         parent_frame.columnconfigure(1, weight=1)
-        ttk.Label(parent_frame, text="Target Host/URL (-h):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(parent_frame, text="Target Host/URL (-h):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         self.nikto_target_var = tk.StringVar()
         self.nikto_target_entry = ttk.Entry(parent_frame, textvariable=self.nikto_target_var, width=50)
-        self.nikto_target_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
+        self.nikto_target_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
         self.nikto_target_entry.bind("<KeyRelease>", self.update_command_preview)
 
-        k_options_frame = ttk.Frame(parent_frame, padding="5")
-        k_options_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
+        k_options_frame = ttk.LabelFrame(parent_frame, text="Options", padding="10")
+        k_options_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
 
-        ttk.Label(k_options_frame, text="Output Format (-Format):").grid(row=0, column=0, sticky="w")
+        ttk.Label(k_options_frame, text="Output Format (-Format):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
         self.nikto_format_var = tk.StringVar(value="txt")
         self.nikto_format_combo = ttk.Combobox(k_options_frame, textvariable=self.nikto_format_var,
-                                               values=['txt', 'csv', 'htm', 'xml'], state="readonly", width=5)
-        self.nikto_format_combo.grid(row=0, column=1, sticky="w")
+                                               values=['txt', 'csv', 'htm', 'xml', 'nbe'], state="readonly", width=5)
+        self.nikto_format_combo.grid(row=0, column=1, sticky="w", padx=5, pady=2)
         self.nikto_format_combo.bind("<<ComboboxSelected>>", self.update_command_preview)
 
-        ttk.Label(k_options_frame, text="Tuning (-Tuning x):").grid(row=1, column=0, sticky="w")
-        self.nikto_tuning_var = tk.StringVar(value="x 123b")  # Default fairly comprehensive
-        # Example tuning options: 0 File Upload, 1 Interesting File, 2 Misconfiguration, 3 Information Disclosure, etc.
+        ttk.Label(k_options_frame, text="Tuning (-Tuning x):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        self.nikto_tuning_var = tk.StringVar(value="x 123b")
         self.nikto_tuning_combo = ttk.Combobox(k_options_frame, textvariable=self.nikto_tuning_var,
-                                               values=['x 123b', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a',
-                                                       'b', 'c', 'd', 'e'], width=15)
-        self.nikto_tuning_combo.grid(row=1, column=1, sticky="w")
+                                               values=['x 0123456789abcde', 'x 123b', '0', '1', '2', '3', '4', '5', '6',
+                                                       '7', '8', '9', 'a', 'b', 'c', 'd', 'e'], width=15)
+        self.nikto_tuning_combo.grid(row=1, column=1, sticky="w", padx=5, pady=2)
         self.nikto_tuning_combo.bind("<<ComboboxSelected>>", self.update_command_preview)
 
         self.nikto_ssl_var = tk.BooleanVar()
         ttk.Checkbutton(k_options_frame, text="-ssl (Force SSL mode)", variable=self.nikto_ssl_var,
-                        command=self.update_command_preview).grid(row=2, column=0, sticky="w")
-        self.nikto_ask_no_var = tk.BooleanVar(value=True)  # Useful for GUI
-        ttk.Checkbutton(k_options_frame, text="-ask no (Auto 'no' to prompts)", variable=self.nikto_ask_no_var,
-                        command=self.update_command_preview).grid(row=2, column=1, sticky="w")
+                        command=self.update_command_preview).grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        self.nikto_ask_no_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(k_options_frame, text="-ask no (Disable prompts)", variable=self.nikto_ask_no_var,
+                        command=self.update_command_preview).grid(row=2, column=1, sticky="w", padx=5, pady=2)
 
-    # --- John the Ripper UI ---
     def _create_john_ui(self, parent_frame):
         parent_frame.columnconfigure(1, weight=1)
-        ttk.Label(parent_frame, text="Hash File:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(parent_frame, text="Hash File:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         self.john_hash_file_var = tk.StringVar()
         self.john_hash_file_entry = ttk.Entry(parent_frame, textvariable=self.john_hash_file_var, width=40)
-        self.john_hash_file_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
+        self.john_hash_file_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=2)
         self.john_hash_file_entry.bind("<KeyRelease>", self.update_command_preview)
         self.john_browse_hash_button = ttk.Button(parent_frame, text="Browse...",
-                                                  command=lambda: self.browse_file(self.john_hash_file_var))
-        self.john_browse_hash_button.grid(row=0, column=2, sticky="e", padx=5, pady=2)
+                                                  command=lambda: self.browse_file(self.john_hash_file_var,
+                                                                                   "Select Hash File"))
+        self.john_browse_hash_button.grid(row=1, column=2, sticky="e", padx=5, pady=2)
 
-        j_options_frame = ttk.Frame(parent_frame, padding="5")
-        j_options_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
+        j_options_frame = ttk.LabelFrame(parent_frame, text="Options", padding="10")
+        j_options_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
 
-        ttk.Label(j_options_frame, text="Wordlist (Optional):").grid(row=0, column=0, sticky="w")
+        ttk.Label(j_options_frame, text="Wordlist (Optional):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
         self.john_wordlist_var = tk.StringVar()
         self.john_wordlist_entry = ttk.Entry(j_options_frame, textvariable=self.john_wordlist_var, width=30)
-        self.john_wordlist_entry.grid(row=0, column=1, sticky="ew")
+        self.john_wordlist_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
         self.john_browse_wordlist_button = ttk.Button(j_options_frame, text="Browse...",
-                                                      command=lambda: self.browse_file(self.john_wordlist_var))
-        self.john_browse_wordlist_button.grid(row=0, column=2, sticky="e")
+                                                      command=lambda: self.browse_file(self.john_wordlist_var,
+                                                                                       "Select Wordlist"))
+        self.john_browse_wordlist_button.grid(row=0, column=2, sticky="e", padx=5, pady=2)
         self.john_wordlist_var.trace_add("write", lambda *args: self.update_command_preview())
 
-        ttk.Label(j_options_frame, text="Format (Optional):").grid(row=1, column=0, sticky="w")
+        ttk.Label(j_options_frame, text="Format (Optional):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         self.john_format_var = tk.StringVar()
-        ttk.Entry(j_options_frame, textvariable=self.john_format_var, width=15).grid(row=1, column=1, sticky="w")
+        ttk.Entry(j_options_frame, textvariable=self.john_format_var, width=15).grid(row=1, column=1, sticky="w",
+                                                                                     padx=5, pady=2)
         self.john_format_var.trace_add("write", lambda *args: self.update_command_preview())
 
-        ttk.Label(j_options_frame, text="Session Name (Optional):").grid(row=2, column=0, sticky="w")
+        ttk.Label(j_options_frame, text="Session Name (Optional):").grid(row=2, column=0, sticky="w", padx=5, pady=2)
         self.john_session_var = tk.StringVar()
-        ttk.Entry(j_options_frame, textvariable=self.john_session_var, width=15).grid(row=2, column=1, sticky="w")
+        ttk.Entry(j_options_frame, textvariable=self.john_session_var, width=15).grid(row=2, column=1, sticky="w",
+                                                                                      padx=5, pady=2)
         self.john_session_var.trace_add("write", lambda *args: self.update_command_preview())
 
         self.john_show_cracked_var = tk.BooleanVar()
         ttk.Checkbutton(j_options_frame, text="--show (Show cracked for session)", variable=self.john_show_cracked_var,
-                        command=self.update_command_preview).grid(row=3, column=0, sticky="w")
+                        command=self.update_command_preview).grid(row=3, column=0, columnspan=2, sticky="w", padx=5,
+                                                                  pady=2)
 
     def browse_file(self, string_var_to_set, title="Select File"):
         filename = filedialog.askopenfilename(title=title)
@@ -517,19 +590,20 @@ class PentestApp:
             self.update_command_preview()
 
     def apply_coloring(self, line_with_newline):
-        """Applies syntax highlighting tags based on line content."""
         line = line_with_newline.strip()
         tags = ()
         tool = self.current_tool_name.get()
 
-        if "ERROR:" in line or "Error:" in line or "Failed" in line or "Traceback" in line:
+        if "ERROR:" in line or "Error:" in line or "[Errno" in line or "[CRITICAL]" in line or "critical error" in line.lower():
+            tags = ("error",)
+        elif "Failed" in line and not "Failed login" in line:
             tags = ("error",)
         elif line.startswith("---") or line.startswith("===") or line.startswith("[*]") or line.startswith(
-                "[+]") or line.startswith("[INFO]"):
+                "[+]") or "[INFO]" in line or "[DEBUG]" in line or "[VERBOSE]" in line:
             tags = ("info",)
 
         if tool == "Gobuster":
-            match_status = re.match(r'.*\(Status: (\d{3})\)', line)
+            match_status = re.search(r'\(Status: (\d{3})\)', line)
             if match_status:
                 status_code = int(match_status.group(1))
                 if status_code == 200:
@@ -543,40 +617,48 @@ class PentestApp:
                 elif 500 <= status_code < 600:
                     tags = ("status_50x",)
             elif line.startswith("Found:"):
-                tags = ("success",)  # For DNS/VHOST
+                tags = ("success",)
         elif tool == "Nmap":
             if "Host is up" in line:
                 tags = ("nmap_host_up", "info")
-            elif "/open" in line:
+            elif "/open" in line and "//" not in line:
                 tags = ("nmap_port_open",)
-            elif "/closed" in line:
+            elif "/closed" in line and "://" not in line:
                 tags = ("nmap_port_closed",)
-            elif "/filtered" in line:
+            elif "/filtered" in line and "://" not in line:
                 tags = ("nmap_port_filtered",)
-            if "Service Info:" in line or "OS details:" in line: tags = ("nmap_service", "info")
+            if "Service Info:" in line or "OS details:" in line or "MAC Address:" in line: tags = (
+            "nmap_service", "info")
         elif tool == "SQLMap":
-            if "vulnerable" in line.lower(): tags = ("sqlmap_vulnerable",)
-            if "fetched data" in line.lower() or line.startswith("["): tags = ("sqlmap_data",)  # Simple catch for data
-            if "DBMS" in line: tags = ("sqlmap_dbms",)
-            if line.startswith("[INFO]") or line.startswith("[DEBUG]") or line.startswith("[WARNING]"): tags = (
-            "sqlmap_info",)  # Override general info for more specific
+            if "vulnerable" in line.lower() and "not vulnerable" not in line.lower(): tags = ("sqlmap_vulnerable",)
+            if "fetched data" in line.lower() or (line.startswith("[") and line.endswith("]") and ":" not in line) or (
+                    "|" in line and "banner" not in line.lower()): tags = ("sqlmap_data",)
+            if "DBMS" in line and ":" in line: tags = ("sqlmap_dbms",)
+            if "[INFO]" in line or "[DEBUG]" in line or "[WARNING]" in line: tags = ("sqlmap_info",)
         elif tool == "Nikto":
-            if line.startswith("+") and ("OSVDB" in line or "vulnerability" in line.lower()):
+            if line.startswith("+") and ("OSVDB" in line or "vulnerability" in line.lower() or "CVE-" in line):
                 tags = ("nikto_vuln",)
             elif line.startswith("+ Server:"):
                 tags = ("nikto_server",)
             elif line.startswith("+"):
-                tags = ("nikto_info",)  # General Nikto findings
+                tags = ("nikto_info",)
         elif tool == "John the Ripper":
-            # Simple check for cracked password line (usually "password (username)" format, but can vary)
-            if re.match(r'^\S+\s+\(\S*\)\s*$', line) and not line.startswith("Loaded") and not line.startswith(
-                    "Proceeding"):
-                # This is a very basic pattern, John's output can be complex
-                # Check if it's not a status line like "0g 0:00:00:00 DONE"
-                if not re.match(r'^\d+g \d+:\d+:\d+:\d+.*', line):
-                    tags = ("john_cracked",)
-            elif "guesses:" in line or "Proceeding with" in line or "Loaded" in line:
+            if not line.startswith("Loaded") and \
+                    not line.startswith("Proceeding") and \
+                    not line.startswith("Using default") and \
+                    not line.startswith("Warning:") and \
+                    not line.startswith("Note:") and \
+                    not line.startswith("Press 'q'") and \
+                    not "words:" in line and \
+                    not "guesses:" in line and \
+                    not "g/s" in line and \
+                    not re.match(r'^\d+g \d+:\d+:\d+:\d+.*', line) and \
+                    re.search(r'^\S+\s+\(?[^)]+\)?\s*$', line):
+                tags = ("john_cracked",)
+            elif "guesses:" in line or "Proceeding with" in line or "Loaded" in line or "Remaining" in line or "words:" in line or "g/s" in line:
                 tags = ("john_status",)
+            elif "No passwords" in line or "No password" in line:
+                tags = ("info",)
 
         return line_with_newline, tags
 
@@ -584,7 +666,7 @@ class PentestApp:
         try:
             while True:
                 line = self.output_queue.get_nowait()
-                if line is None:  # Sentinel
+                if line is None:
                     self.set_scan_state(running=False, status="Finished")
                     return
                 else:
@@ -596,20 +678,21 @@ class PentestApp:
         except queue.Empty:
             if self.proc_thread and self.proc_thread.is_alive():
                 self.master.after(100, self.update_output)
-            elif self.stop_button['state'] == tk.NORMAL:  # Scan was running
+            elif self.stop_button['state'] == tk.NORMAL:
                 self.set_scan_state(running=False, status="Error/Unexpected Finish")
 
     def _get_command_for_current_tool(self):
-        tool_name = self.current_tool_name.get()
-        cmd_list = []
-        executable = FOUND_EXECUTABLES.get(tool_name.lower().replace(" ", ""))
+        tool_name_display = self.current_tool_name.get()
+        tool_name_key = tool_name_display.lower().replace(" ", "")
+        if tool_name_key == "johntheripper": tool_name_key = "john"
 
-        if not executable:
-            raise ValueError(f"{tool_name} executable not found. Please check installation and PATH.")
+        cmd_list_base = FOUND_EXECUTABLES.get(tool_name_key)
+        if not cmd_list_base:
+            raise ValueError(f"{tool_name_display} executable not found. Please check installation and PATH.")
 
-        cmd_list.extend(executable)  # Add the executable path (could be ['python3', 'script.py'])
+        cmd_list = list(cmd_list_base)
 
-        if tool_name == "Gobuster":
+        if tool_name_display == "Gobuster":
             mode_cmd = self.gobuster_modes.get(self.gobuster_current_mode_var.get())
             target = self.gobuster_target_var.get().strip()
             wordlist = self.gobuster_wordlist_var.get().strip()
@@ -628,75 +711,84 @@ class PentestApp:
                     raise ValueError("Gobuster DNS target should be a domain (e.g., example.com).")
                 cmd_list.extend(['-d', target])
             cmd_list.extend(['-w', wordlist])
-            cmd_list.extend(['-t', self.gobuster_threads_var.get().strip()])
+            if self.gobuster_threads_var.get(): cmd_list.extend(['-t', self.gobuster_threads_var.get().strip()])
             if self.gobuster_extensions_var.get(): cmd_list.extend(['-x', self.gobuster_extensions_var.get().strip()])
             if self.gobuster_status_codes_var.get(): cmd_list.extend(
                 ['-s', self.gobuster_status_codes_var.get().strip()])
-            cmd_list.append('--no-progress')  # Always for GUI
+            cmd_list.append('--no-progress')
+            cmd_list.append('-q')
 
-        elif tool_name == "Nmap":
+        elif tool_name_display == "Nmap":
             target = self.nmap_target_var.get().strip()
             if not target: raise ValueError("Nmap target cannot be empty.")
-            cmd_list.append(target)
-            if self.nmap_ports_var.get(): cmd_list.extend(['-p', self.nmap_ports_var.get().strip()])
 
-            selected_scan_type = False
-            for type_cmd, var in self.nmap_scan_type_vars.items():
-                if var.get():
-                    cmd_list.append(type_cmd.split(" ")[0])  # e.g., -sS
-                    selected_scan_type = True
-
+            temp_cmd_list = []
             if self.nmap_ping_scan_var.get():
-                cmd_list.append("-sn")
-            elif not selected_scan_type and not self.nmap_fast_scan_var.get() and not self.nmap_ports_var.get():  # If no specific port scan, add a default if not ping
-                pass  # Nmap will do default scan if no type specified and not -sn
+                temp_cmd_list.append("-sn")
+            else:
+                selected_scan_type = False
+                for type_cmd_full, var in self.nmap_scan_type_vars.items():
+                    if var.get():
+                        temp_cmd_list.append(type_cmd_full.split(" ")[0])
+                        selected_scan_type = True
+            if self.nmap_ports_var.get() and not self.nmap_ping_scan_var.get():
+                temp_cmd_list.extend(['-p', self.nmap_ports_var.get().strip()])
+            if self.nmap_no_ping_var.get(): temp_cmd_list.append("-Pn")
+            if self.nmap_os_detect_var.get() and not self.nmap_ping_scan_var.get(): temp_cmd_list.append("-O")
+            if self.nmap_version_detect_var.get() and not self.nmap_ping_scan_var.get(): temp_cmd_list.append("-sV")
+            if self.nmap_fast_scan_var.get() and not self.nmap_ping_scan_var.get(): temp_cmd_list.append("-F")
+            if self.nmap_verbose_var.get(): temp_cmd_list.append("-v")
+            cmd_list.extend(temp_cmd_list)
+            cmd_list.append(target)
 
-            if self.nmap_no_ping_var.get(): cmd_list.append("-Pn")
-            if self.nmap_os_detect_var.get(): cmd_list.append("-O")
-            if self.nmap_version_detect_var.get(): cmd_list.append("-sV")
-            if self.nmap_fast_scan_var.get(): cmd_list.append("-F")
-            if self.nmap_verbose_var.get(): cmd_list.append("-v")
-
-
-        elif tool_name == "SQLMap":
+        elif tool_name_display == "SQLMap":
             target = self.sqlmap_target_var.get().strip()
             if not target: raise ValueError("SQLMap target URL cannot be empty.")
             cmd_list.extend(['-u', target])
             if self.sqlmap_batch_var.get(): cmd_list.append("--batch")
             if self.sqlmap_dbs_var.get(): cmd_list.append("--dbs")
             if self.sqlmap_current_db_var.get(): cmd_list.append("--current-db")
-            if self.sqlmap_db_name_var.get(): cmd_list.extend(['-D', self.sqlmap_db_name_var.get().strip()])
-            if self.sqlmap_tables_var.get(): cmd_list.append("--tables")
-            if self.sqlmap_table_name_var.get(): cmd_list.extend(['-T', self.sqlmap_table_name_var.get().strip()])
-            if self.sqlmap_dump_var.get(): cmd_list.append("--dump")
+
+            db_name = self.sqlmap_db_name_var.get().strip()
+            table_name = self.sqlmap_table_name_var.get().strip()
+
+            if self.sqlmap_tables_var.get():
+                cmd_list.append("--tables")
+                if db_name: cmd_list.extend(['-D', db_name])
+
+            if self.sqlmap_dump_var.get():
+                cmd_list.append("--dump")
+                if db_name: cmd_list.extend(['-D', db_name])
+                if table_name: cmd_list.extend(['-T', table_name])
+            elif db_name and not self.sqlmap_tables_var.get() and not self.sqlmap_dump_var.get():
+                cmd_list.extend(['-D', db_name])
+
             if self.sqlmap_level_var.get(): cmd_list.extend(["--level", self.sqlmap_level_var.get().strip()])
             if self.sqlmap_risk_var.get(): cmd_list.extend(["--risk", self.sqlmap_risk_var.get().strip()])
+            cmd_list.append("--disable-coloring")
 
-
-        elif tool_name == "Nikto":
+        elif tool_name_display == "Nikto":
             target = self.nikto_target_var.get().strip()
             if not target: raise ValueError("Nikto target cannot be empty.")
             cmd_list.extend(['-h', target])
             if self.nikto_format_var.get(): cmd_list.extend(['-Format', self.nikto_format_var.get()])
             if self.nikto_tuning_var.get(): cmd_list.extend(['-Tuning', self.nikto_tuning_var.get()])
             if self.nikto_ssl_var.get(): cmd_list.append("-ssl")
-            if self.nikto_ask_no_var.get(): cmd_list.append(
-                "-ask")  # 'no' is implied by just -ask for some versions, others need 'no' explicitly.
-            # Nikto docs say: -ask auto|all|none|no - default: auto
-            # for GUI, 'no' or 'none' is best. 'auto' might still prompt. Using 'no'.
+            if self.nikto_ask_no_var.get(): cmd_list.extend(["-ask", "no"])
+            cmd_list.append("-Display")
+            cmd_list.append("1234D")
 
-
-        elif tool_name == "John the Ripper":
+        elif tool_name_display == "John the Ripper":
             hash_file = self.john_hash_file_var.get().strip()
             if not hash_file: raise ValueError("John hash file cannot be empty.")
             if not os.path.exists(hash_file): raise ValueError(f"John hash file not found: {hash_file}")
 
             if self.john_show_cracked_var.get():
                 cmd_list.append("--show")
-                cmd_list.append(hash_file)  # For --show, hash_file is an argument to --show typically
-                if self.john_session_var.get():  # Show for a specific session
-                    cmd_list.extend([f"--session={self.john_session_var.get().strip()}"])  # John takes --session=name
-            else:  # Normal cracking mode
+                if self.john_format_var.get(): cmd_list.append(f"--format={self.john_format_var.get().strip()}")
+                cmd_list.append(hash_file)
+                if self.john_session_var.get(): cmd_list.append(f"--session={self.john_session_var.get().strip()}")
+            else:
                 cmd_list.append(hash_file)
                 if self.john_wordlist_var.get():
                     wordlist = self.john_wordlist_var.get().strip()
@@ -704,20 +796,12 @@ class PentestApp:
                     cmd_list.append(f"--wordlist={wordlist}")
                 if self.john_format_var.get(): cmd_list.append(f"--format={self.john_format_var.get().strip()}")
                 if self.john_session_var.get(): cmd_list.append(f"--session={self.john_session_var.get().strip()}")
-
         return cmd_list
 
     def update_command_preview(self, event=None):
         try:
             cmd_list = self._get_command_for_current_tool()
-            # Handle cases where executable itself is a list (e.g. ['python3', 'script.py'])
-            quoted_cmd_list = []
-            for item in cmd_list:
-                if isinstance(item,
-                              list):  # Should not happen if find_executable returns a flat list for FOUND_EXECUTABLES[tool_name]
-                    quoted_cmd_list.extend(map(shlex.quote, item))
-                else:
-                    quoted_cmd_list.append(shlex.quote(item))
+            quoted_cmd_list = [shlex.quote(str(item)) for item in cmd_list]
             preview_text = " ".join(quoted_cmd_list)
             self.cmd_preview_var.set(preview_text)
         except ValueError as e:
@@ -741,28 +825,34 @@ class PentestApp:
             messagebox.showwarning("Scan Active", f"A {self.proc_thread_tool_name} scan is already running.")
             return
 
-        current_tool = self.current_tool_name.get()
-        if not FOUND_EXECUTABLES.get(current_tool.lower().replace(" ", "")):
-            messagebox.showerror("Tool Not Found", f"{current_tool} executable not found. Cannot start scan.")
+        current_tool_display_name = self.current_tool_name.get()
+        current_tool_key = current_tool_display_name.lower().replace(" ", "")
+        if current_tool_key == "johntheripper": current_tool_key = "john"
+
+        if not FOUND_EXECUTABLES.get(current_tool_key):
+            messagebox.showerror("Tool Not Found",
+                                 f"{current_tool_display_name} executable not found. Cannot start scan.")
+            self.start_button.config(state=tk.DISABLED)
             return
 
         try:
             args_list = self._get_command_for_current_tool()
             self.output_text.configure(state='normal')
             self.output_text.delete('1.0', tk.END)
-            cmd_preview_for_log = " ".join(map(shlex.quote, args_list))
-            self.output_text.insert(tk.END, f"Starting {current_tool}: {cmd_preview_for_log}\n\n", ("info",))
+            cmd_display_for_log = " ".join(map(str, args_list))
+            self.output_text.insert(tk.END, f"Starting {current_tool_display_name}: {cmd_display_for_log}\n\n",
+                                    ("info",))
             self.output_text.configure(state='disabled')
-            self.set_scan_state(running=True, status=f"Running {current_tool}...")
+            self.set_scan_state(running=True, status=f"Running {current_tool_display_name}...")
 
             self.stop_event.clear()
-            while not self.output_queue.empty(): self.output_queue.get()
-            while not self.process_queue.empty(): self.process_queue.get()
+            while not self.output_queue.empty(): self.output_queue.get_nowait()
+            while not self.process_queue.empty(): self.process_queue.get_nowait()
 
-            self.proc_thread_tool_name = current_tool  # Store which tool is running
+            self.proc_thread_tool_name = current_tool_display_name
             self.proc_thread = threading.Thread(
                 target=run_command_in_thread,
-                args=(args_list, self.output_queue, self.process_queue, self.stop_event, current_tool),
+                args=(args_list, self.output_queue, self.process_queue, self.stop_event, current_tool_display_name),
                 daemon=True
             )
             self.proc_thread.start()
@@ -772,49 +862,67 @@ class PentestApp:
             messagebox.showerror("Input Error", str(e))
             self.set_scan_state(running=False, status="Input Error")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to start {current_tool}:\n{type(e).__name__}: {e}")
+            messagebox.showerror("Error", f"Failed to start {current_tool_display_name}:\n{type(e).__name__}: {e}")
             self.set_scan_state(running=False, status="Error")
 
     def stop_scan(self):
-        tool_name = self.proc_thread_tool_name if hasattr(self, 'proc_thread_tool_name') else "Scan"
+        tool_name = self.proc_thread_tool_name if hasattr(self,
+                                                          'proc_thread_tool_name') and self.proc_thread_tool_name else "Scan"
+
+        if not (self.proc_thread and self.proc_thread.is_alive()):
+            self.set_scan_state(running=False, status=f"{tool_name} not running or already stopped.")
+            return
+
         self.set_scan_state(running=False, status=f"Stopping {tool_name}...")
         self.stop_event.set()
 
         proc_to_stop = None
         try:
-            proc_to_stop = self.process_queue.get_nowait()
+            proc_to_stop = self.process_queue.get(timeout=1)
         except queue.Empty:
-            self.insert_output_line(f"\n--- Stop requested, but {tool_name} process not found in queue ---", ("info",))
+            self.insert_output_line(
+                f"\n--- Stop requested, but {tool_name} process object not found in queue after timeout. ---",
+                ("info",))
         except Exception as e:
             self.insert_output_line(f"\n--- Error getting {tool_name} process from queue for stop: {e} ---", ("error",))
 
         if proc_to_stop and proc_to_stop.poll() is None:
-            self.insert_output_line(f"\n--- Sending terminate signal to {tool_name} ---", ("info",))
+            self.insert_output_line(f"\n--- Sending terminate signal to {tool_name} (PID: {proc_to_stop.pid}) ---",
+                                    ("info",))
             try:
                 proc_to_stop.terminate()
                 try:
-                    proc_to_stop.wait(timeout=0.5)
+                    proc_to_stop.wait(timeout=1)
                 except subprocess.TimeoutExpired:
                     self.insert_output_line(
                         f"\n--- {tool_name} process did not terminate quickly, sending kill signal ---", ("error",))
                     proc_to_stop.kill()
+                    try:
+                        proc_to_stop.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        self.insert_output_line(f"\n--- {tool_name} process did not die after kill signal. ---",
+                                                ("error",))
             except Exception as e:
                 self.insert_output_line(f"\n--- Error trying to stop {tool_name} process: {e} ---", ("error",))
+        elif proc_to_stop and proc_to_stop.poll() is not None:
+            self.insert_output_line(
+                f"\n--- {tool_name} process already terminated (exit code: {proc_to_stop.poll()}). ---", ("info",))
 
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
-        self.status_label.config(text=f"Status: {tool_name} stopped by user")
+        if self.status_label.cget("text").endswith("..."):
+            self.status_label.config(text=f"Status: {tool_name} stopped by user")
         self.progress_bar.stop()
         self.progress_bar.grid_remove()
 
     def insert_output_line(self, line, tags=()):
         try:
             self.output_text.configure(state='normal')
-            self.output_text.insert(tk.END, line + "\n", tags)  # Ensure newline
+            self.output_text.insert(tk.END, line + "\n", tags)
             self.output_text.see(tk.END)
             self.output_text.configure(state='disabled')
         except tk.TclError:
-            print("Warning: Could not write to output widget (likely closing).")
+            pass
         except Exception as e:
             print(f"Error inserting output line: {e}")
 
@@ -842,10 +950,34 @@ class PentestApp:
                 messagebox.showerror("Export Error", f"Failed to save file:\n{e}")
 
 
-# --- Main Execution ---
+def display_tool_installation_guidance(missing_tool_info):
+    title = "Missing Tools - Installation Guidance"
+    message = "The following tools could not be found automatically:\n\n"
+    is_linux_apt = sys.platform.startswith('linux') and shutil.which('apt')
+
+    for tool_key, display_name in missing_tool_info:
+        message += f"- {display_name}\n"
+        pkg_name = COMMON_PACKAGE_NAMES.get(tool_key)
+        if is_linux_apt and pkg_name:
+            message += f"  On Debian/Ubuntu, try: sudo apt update && sudo apt install -y {pkg_name}\n"
+        elif tool_key == "sqlmap":
+            message += f"  Consider cloning from GitHub: git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git sqlmap-dev\n"
+            message += f"  Then run 'python3 sqlmap.py' from its directory.\n"
+        elif tool_key == "nikto":
+            message += f"  Consider cloning from GitHub: git clone https://github.com/sullo/nikto.git\n"
+            message += f"  Then run 'perl nikto.pl' from its program/ directory.\n"
+        else:
+            message += f"  Please install it using your system's package manager or download it from its official website.\n"
+        message += "\n"
+
+    message += "\nFunctionality for these tools will be unavailable or may fail until they are installed and accessible in your system PATH, or their paths are configured in the script (by editing EXECUTABLE_PATHS)."
+    messagebox.showwarning(title, message)
+
+
 if __name__ == '__main__':
     try:
         root = tk.Tk()
+        root.withdraw()
     except tk.TclError:
         print("ERROR: Tkinter is not available or configured correctly.", file=sys.stderr)
         print("On Debian/Ubuntu/Kali, try: sudo apt update && sudo apt install python3-tk", file=sys.stderr)
@@ -854,17 +986,19 @@ if __name__ == '__main__':
         print(f"An unexpected error occurred initializing Tkinter: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Check for executables after root window is created (for potential dialogs if needed later)
-    missing_tools = []
-    for tool_name_key in EXECUTABLE_PATHS.keys():
-        if not FOUND_EXECUTABLES.get(tool_name_key):
-            missing_tools.append(tool_name_key.capitalize())
+    missing_tool_details = []
+    tool_display_names_map = {
+        'gobuster': 'Gobuster', 'nmap': 'Nmap', 'sqlmap': 'SQLMap',
+        'nikto': 'Nikto', 'john': 'John the Ripper'
+    }
+    for tool_key in EXECUTABLE_PATHS.keys():
+        display_name = tool_display_names_map.get(tool_key, tool_key.capitalize())
+        if not FOUND_EXECUTABLES.get(tool_key):
+            missing_tool_details.append((tool_key, display_name))
 
-    if missing_tools:
-        messagebox.showwarning("Missing Tools",
-                               f"The following tools could not be found automatically:\n- {', '.join(missing_tools)}\n"
-                               "Functionality for these tools will be unavailable or may fail.\n"
-                               "Please ensure they are installed and in your system PATH, or configure paths in the script.")
+    if missing_tool_details:
+        display_tool_installation_guidance(missing_tool_details)
 
+    root.deiconify()
     app = PentestApp(root)
     root.mainloop()
