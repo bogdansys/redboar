@@ -32,41 +32,41 @@ def find_executable(tool_name):
     for path_candidate in paths_to_check:
         print(f"[DEBUG] Checking candidate for '{tool_name}': '{path_candidate}'")
         if path_candidate == tool_name:
-             print(f"[DEBUG] Python's PATH environment variable: {os.environ.get('PATH')}")
-        
-        found_path = shutil.which(path_candidate)
-        print(f"[DEBUG] shutil.which('{path_candidate}') returned: '{found_path}'")
-        
-        if found_path:
-            is_executable = os.access(found_path, os.X_OK)
-            print(f"[DEBUG] Path '{found_path}' for '{tool_name}' exists. Is executable by script: {is_executable}")
-            if not is_executable:
-                print(f"[DEBUG] Path '{found_path}' is NOT marked as executable by the current user/script. Skipping.")
-                continue
+            print(f"[DEBUG] Python's PATH environment variable: {os.environ.get('PATH')}")
 
+        found_path = shutil.which(path_candidate)
+        if not found_path and (os.path.isabs(path_candidate) or os.sep in path_candidate):
+            if os.path.exists(path_candidate):
+                found_path = os.path.abspath(path_candidate)
+                print(f"[DEBUG] Found '{tool_name}' by direct path: '{found_path}'")
+        print(f"[DEBUG] Candidate resolved to: '{found_path}'")
+
+        if found_path:
             if tool_name == 'sqlmap' and (found_path.endswith('.py') or 'sqlmap.py' in path_candidate):
                 python_exe = shutil.which('python3') or shutil.which('python')
                 if python_exe:
-                    print(f"[DEBUG] '{tool_name}' is a python script, {python_exe} found.")
                     FOUND_EXECUTABLES[tool_name] = [python_exe, found_path]
+                    print(f"[DEBUG] '{tool_name}' is a python script, interpreter '{python_exe}' will be used")
                     return FOUND_EXECUTABLES[tool_name]
                 else:
-                    print(f"[DEBUG] '{tool_name}' is a python script, but no python/python3 interpreter NOT found.")
-                    continue 
+                    print(f"[DEBUG] '{tool_name}' is a python script, but no python/python3 interpreter found.")
+                    continue
             elif tool_name == 'nikto' and (found_path.endswith('.pl') or 'nikto.pl' in path_candidate):
                 perl_exe = shutil.which('perl')
                 if perl_exe:
-                    print(f"[DEBUG] '{tool_name}' is a perl script, perl found.")
                     FOUND_EXECUTABLES[tool_name] = [perl_exe, found_path]
+                    print(f"[DEBUG] '{tool_name}' is a perl script, interpreter '{perl_exe}' will be used")
                     return FOUND_EXECUTABLES[tool_name]
                 else:
-                    print(f"[DEBUG] '{tool_name}' is a perl script, but perl interpreter NOT found.")
+                    print(f"[DEBUG] '{tool_name}' is a perl script, but perl interpreter not found.")
                     continue
-            
-            FOUND_EXECUTABLES[tool_name] = [found_path]
-            print(f"[DEBUG] Successfully found and cached '{tool_name}' as: {FOUND_EXECUTABLES[tool_name]}")
-            return FOUND_EXECUTABLES[tool_name]
-            
+            elif os.access(found_path, os.X_OK):
+                FOUND_EXECUTABLES[tool_name] = [found_path]
+                print(f"[DEBUG] Successfully found and cached '{tool_name}' as: {FOUND_EXECUTABLES[tool_name]}")
+                return FOUND_EXECUTABLES[tool_name]
+            else:
+                print(f"[DEBUG] Path '{found_path}' is not executable and no interpreter was matched. Skipping.")
+
     FOUND_EXECUTABLES[tool_name] = None
     print(f"[DEBUG] Failed to find '{tool_name}' after checking all candidates. Caching as None.")
     return None
