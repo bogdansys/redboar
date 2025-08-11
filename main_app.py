@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 import subprocess
 import threading
 import queue
@@ -9,8 +9,12 @@ import shlex
 import shutil
 import sys
 import re
-import platform
 import datetime
+import logging
+import signal
+import json
+
+from pathlib import Path
 
 import config
 import ui_gobuster
@@ -21,54 +25,64 @@ import ui_john
 
 FOUND_EXECUTABLES = {}
 
+# Configure logging (DEBUG when REDBOAR_DEBUG is set, otherwise INFO)
+_log_level = logging.DEBUG if os.environ.get('REDBOAR_DEBUG') else logging.INFO
+logging.basicConfig(level=_log_level, format='[%(levelname)s] %(message)s')
+logger = logging.getLogger("redboar")
+
+
+def _normalize_tool_key(display_name: str) -> str:
+    key = display_name.lower().replace(" ", "").replace("-", "")
+    return "john" if key == "johntheripper" else key
+
 def find_executable(tool_name):
-    print(f"\n[DEBUG] Attempting to find executable for tool: {tool_name}")
+    logger.debug("Attempting to find executable for tool: %s", tool_name)
     if tool_name in FOUND_EXECUTABLES and FOUND_EXECUTABLES[tool_name]:
-        print(f"[DEBUG] Found '{tool_name}' in cache: {FOUND_EXECUTABLES[tool_name]}")
+        logger.debug("Found '%s' in cache: %s", tool_name, FOUND_EXECUTABLES[tool_name])
         return FOUND_EXECUTABLES[tool_name]
 
     paths_to_check = config.EXECUTABLE_PATHS.get(tool_name, [tool_name])
-    print(f"[DEBUG] Paths to check for '{tool_name}': {paths_to_check}")
+    logger.debug("Paths to check for '%s': %s", tool_name, paths_to_check)
     for path_candidate in paths_to_check:
-        print(f"[DEBUG] Checking candidate for '{tool_name}': '{path_candidate}'")
+        logger.debug("Checking candidate for '%s': '%s'", tool_name, path_candidate)
         if path_candidate == tool_name:
-            print(f"[DEBUG] Python's PATH environment variable: {os.environ.get('PATH')}")
+            logger.debug("Python PATH: %s", os.environ.get('PATH'))
 
         found_path = shutil.which(path_candidate)
         if not found_path and (os.path.isabs(path_candidate) or os.sep in path_candidate):
             if os.path.exists(path_candidate):
                 found_path = os.path.abspath(path_candidate)
-                print(f"[DEBUG] Found '{tool_name}' by direct path: '{found_path}'")
-        print(f"[DEBUG] Candidate resolved to: '{found_path}'")
+                logger.debug("Found '%s' by direct path: '%s'", tool_name, found_path)
+        logger.debug("Candidate resolved to: '%s'", found_path)
 
         if found_path:
             if tool_name == 'sqlmap' and (found_path.endswith('.py') or 'sqlmap.py' in path_candidate):
                 python_exe = shutil.which('python3') or shutil.which('python')
                 if python_exe:
                     FOUND_EXECUTABLES[tool_name] = [python_exe, found_path]
-                    print(f"[DEBUG] '{tool_name}' is a python script, interpreter '{python_exe}' will be used")
+                    logger.debug("'%s' is a python script, interpreter '%s' will be used", tool_name, python_exe)
                     return FOUND_EXECUTABLES[tool_name]
                 else:
-                    print(f"[DEBUG] '{tool_name}' is a python script, but no python/python3 interpreter found.")
+                    logger.debug("'%s' is a python script, but no python/python3 interpreter found.")
                     continue
             elif tool_name == 'nikto' and (found_path.endswith('.pl') or 'nikto.pl' in path_candidate):
                 perl_exe = shutil.which('perl')
                 if perl_exe:
                     FOUND_EXECUTABLES[tool_name] = [perl_exe, found_path]
-                    print(f"[DEBUG] '{tool_name}' is a perl script, interpreter '{perl_exe}' will be used")
+                    logger.debug("'%s' is a perl script, interpreter '%s' will be used", tool_name, perl_exe)
                     return FOUND_EXECUTABLES[tool_name]
                 else:
-                    print(f"[DEBUG] '{tool_name}' is a perl script, but perl interpreter not found.")
+                    logger.debug("'%s' is a perl script, but perl interpreter not found.")
                     continue
             elif os.access(found_path, os.X_OK):
                 FOUND_EXECUTABLES[tool_name] = [found_path]
-                print(f"[DEBUG] Successfully found and cached '{tool_name}' as: {FOUND_EXECUTABLES[tool_name]}")
+                logger.debug("Successfully found and cached '%s' as: %s", tool_name, FOUND_EXECUTABLES[tool_name])
                 return FOUND_EXECUTABLES[tool_name]
             else:
-                print(f"[DEBUG] Path '{found_path}' is not executable and no interpreter was matched. Skipping.")
+                logger.debug("Path '%s' is not executable and no interpreter was matched. Skipping.", found_path)
 
     FOUND_EXECUTABLES[tool_name] = None
-    print(f"[DEBUG] Failed to find '{tool_name}' after checking all candidates. Caching as None.")
+    logger.debug("Failed to find '%s' after checking all candidates. Caching as None.")
     return None
 
 for tool_key in config.EXECUTABLE_PATHS.keys():
@@ -77,8 +91,7 @@ for tool_key in config.EXECUTABLE_PATHS.keys():
 def run_command_in_thread(args_list, output_queue, process_queue, stop_event, tool_name="Tool"):
     process = None
     try:
-        process = subprocess.Popen(
-            args_list,
+        popen_kwargs = dict(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -86,6 +99,10 @@ def run_command_in_thread(args_list, output_queue, process_queue, stop_event, to
             universal_newlines=True,
             errors='replace'
         )
+        # On Linux, start a new process group so we can signal the whole tree on stop
+        if os.name == 'posix' and hasattr(os, 'setsid'):
+            popen_kwargs['preexec_fn'] = os.setsid
+        process = subprocess.Popen(args_list, **popen_kwargs)
         process_queue.put(process)
 
         if process.stdout:
@@ -110,13 +127,26 @@ def run_command_in_thread(args_list, output_queue, process_queue, stop_event, to
     finally:
         if process and process.poll() is None:
             try:
-                process.terminate()
-                process.wait(timeout=0.5)
-                if process.poll() is None:
-                    process.kill()
+                if os.name == 'posix':
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    except Exception:
+                        process.terminate()
+                else:
+                    process.terminate()
+                try:
+                    process.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    if os.name == 'posix':
+                        try:
+                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        except Exception:
+                            process.kill()
+                    else:
+                        process.kill()
                     process.wait(timeout=0.5)
             except Exception as e:
-                print(f"Error during final {tool_name} process cleanup: {e}", file=sys.stderr)
+                logger.error("Error during final %s process cleanup: %s", tool_name, e)
                 try:
                     output_queue.put(f"\n--- Error during final {tool_name} process cleanup: {e} ---")
                 except Exception:
@@ -135,8 +165,9 @@ class PentestApp:
         available_themes = self.style.theme_names()
         if 'clam' in available_themes: self.style.theme_use('clam')
         elif 'alt' in available_themes: self.style.theme_use('alt')
+        # Style for missing-tool labels
+        self.style.configure("tool_not_found_msg.TLabel", foreground="red", font=("TkDefaultFont", 10, "italic"))
 
-        self.process = None
         self.proc_thread = None
         self.output_queue = queue.Queue()
         self.process_queue = queue.Queue()
@@ -144,6 +175,9 @@ class PentestApp:
         self.proc_thread_tool_name = "Tool"
 
         self.current_tool_name = tk.StringVar(value="Gobuster")
+        self.extra_args_var = tk.StringVar()
+        self.search_var = tk.StringVar()
+        self._last_search_index = None
 
         self._create_menubar()
         self.create_widgets()
@@ -176,6 +210,11 @@ class PentestApp:
         self.menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="About Redboar", command=self.show_about_dialog)
 
+        profiles_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Profiles", menu=profiles_menu)
+        profiles_menu.add_command(label="Save Profile...", command=self.save_profile)
+        profiles_menu.add_command(label="Load Profile...", command=self.load_profile)
+
     def show_about_dialog(self):
         about_message = (
             "Redboar Pentesting GUI\n\n"
@@ -187,29 +226,30 @@ class PentestApp:
         messagebox.showinfo("About Redboar", about_message)
 
     def _configure_output_tags(self):
+        fixed_bold = ("TkFixedFont", 10, "bold")
         self.output_text.tag_configure("status_200", foreground="green")
         self.output_text.tag_configure("status_30x", foreground="blue")
         self.output_text.tag_configure("status_401", foreground="darkorange")
         self.output_text.tag_configure("status_403", foreground="red")
         self.output_text.tag_configure("status_50x", foreground="magenta")
-        self.output_text.tag_configure("error", foreground="red", font=('monospace', 10, 'bold'))
+        self.output_text.tag_configure("error", foreground="red", font=fixed_bold)
         self.output_text.tag_configure("info", foreground="grey")
-        self.output_text.tag_configure("success", foreground="green", font=('monospace', 10, 'bold'))
+        self.output_text.tag_configure("success", foreground="green", font=fixed_bold)
         self.output_text.tag_configure("nmap_port_open", foreground="green")
         self.output_text.tag_configure("nmap_port_closed", foreground="red")
         self.output_text.tag_configure("nmap_port_filtered", foreground="orange")
         self.output_text.tag_configure("nmap_host_up", foreground="green")
         self.output_text.tag_configure("nmap_service", foreground="blue")
-        self.output_text.tag_configure("sqlmap_vulnerable", foreground="red", font=('monospace', 10, 'bold'))
+        self.output_text.tag_configure("sqlmap_vulnerable", foreground="red", font=fixed_bold)
         self.output_text.tag_configure("sqlmap_info", foreground="cyan")
         self.output_text.tag_configure("sqlmap_dbms", foreground="purple")
         self.output_text.tag_configure("sqlmap_data", foreground="green")
-        self.output_text.tag_configure("nikto_vuln", foreground="red", font=('monospace', 10, 'bold'))
+        self.output_text.tag_configure("nikto_vuln", foreground="red", font=fixed_bold)
         self.output_text.tag_configure("nikto_info", foreground="blue")
         self.output_text.tag_configure("nikto_server", foreground="purple")
-        self.output_text.tag_configure("john_cracked", foreground="green", font=('monospace', 10, 'bold'))
+        self.output_text.tag_configure("john_cracked", foreground="green", font=fixed_bold)
         self.output_text.tag_configure("john_status", foreground="grey")
-        self.output_text.tag_configure("tool_not_found_msg", foreground="red", font=('monospace', 10, 'italic'))
+        self.output_text.tag_configure("tool_not_found_msg", foreground="red", font=("TkFixedFont", 10, "italic"))
 
     def create_widgets(self):
         self.main_notebook = ttk.Notebook(self.master, padding="5")
@@ -240,11 +280,17 @@ class PentestApp:
         
         ttk.Label(cmd_preview_frame, text="Command Preview:").grid(row=0, column=0, sticky="w", padx=(0,5))
         self.cmd_preview_var = tk.StringVar()
-        cmd_entry = ttk.Entry(cmd_preview_frame, textvariable=self.cmd_preview_var, state="readonly", font="monospace 10")
+        cmd_entry = ttk.Entry(cmd_preview_frame, textvariable=self.cmd_preview_var, state="readonly", font=("TkFixedFont", 10))
         cmd_entry.grid(row=0, column=1, sticky="ew")
         
         self.copy_cmd_button = ttk.Button(cmd_preview_frame, text="Copy", command=self.copy_command_to_clipboard, width=8)
         self.copy_cmd_button.grid(row=0, column=2, sticky="e", padx=(5,0))
+
+        ttk.Label(cmd_preview_frame, text="Extra Args:").grid(row=1, column=0, sticky="w", padx=(0,5), pady=(5,0))
+        extra_entry = ttk.Entry(cmd_preview_frame, textvariable=self.extra_args_var, font=("TkFixedFont", 10))
+        extra_entry.grid(row=1, column=1, sticky="ew", pady=(5,0))
+        ttk.Button(cmd_preview_frame, text="Clear", width=8, command=lambda: (self.extra_args_var.set(""), self.update_command_preview())).grid(row=1, column=2, sticky="e", padx=(5,0), pady=(5,0))
+        self.extra_args_var.trace_add("write", lambda *args: self.update_command_preview())
 
         self.progress_bar = ttk.Progressbar(self.master, mode='indeterminate', length=200)
         self.progress_bar.grid(row=2, column=0, sticky="ew", padx=5, pady=(5, 5))
@@ -252,10 +298,20 @@ class PentestApp:
 
         output_frame = ttk.Frame(self.master, padding="5")
         output_frame.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
-        output_frame.rowconfigure(0, weight=1)
+        output_frame.rowconfigure(1, weight=1)
         output_frame.columnconfigure(0, weight=1)
-        self.output_text = scrolledtext.ScrolledText(output_frame, wrap=tk.WORD, height=15, font="monospace 10")
-        self.output_text.grid(row=0, column=0, sticky="nsew")
+
+        search_bar = ttk.Frame(output_frame)
+        search_bar.grid(row=0, column=0, sticky="ew", pady=(0,5))
+        search_bar.columnconfigure(1, weight=1)
+        ttk.Label(search_bar, text="Search:").grid(row=0, column=0, sticky="w")
+        self.search_entry = ttk.Entry(search_bar, textvariable=self.search_var, font=("TkFixedFont", 10))
+        self.search_entry.grid(row=0, column=1, sticky="ew", padx=(5,5))
+        ttk.Button(search_bar, text="Find Next", command=self.find_next_in_output, width=10).grid(row=0, column=2)
+        ttk.Button(search_bar, text="Clear Highlights", command=self.clear_search_highlights, width=16).grid(row=0, column=3, padx=(5,0))
+
+        self.output_text = scrolledtext.ScrolledText(output_frame, wrap=tk.WORD, height=15, font=("TkFixedFont", 10))
+        self.output_text.grid(row=1, column=0, sticky="nsew")
         self.output_text.configure(state='disabled')
 
         control_frame = ttk.Frame(self.master, padding="10 5")
@@ -270,8 +326,10 @@ class PentestApp:
         self.clear_button.grid(row=0, column=2, padx=5)
         self.export_button = ttk.Button(control_frame, text="Export Output", command=self.export_results, width=12)
         self.export_button.grid(row=0, column=3, padx=5)
+        self.export_html_button = ttk.Button(control_frame, text="Export HTML", command=self.export_results_html, width=12)
+        self.export_html_button.grid(row=0, column=4, padx=5)
         self.status_label = ttk.Label(control_frame, text="Status: Idle", anchor="e")
-        self.status_label.grid(row=0, column=4, sticky="e", padx=5)
+        self.status_label.grid(row=0, column=5, sticky="e", padx=5)
 
     def copy_command_to_clipboard(self):
         command = self.cmd_preview_var.get()
@@ -284,6 +342,30 @@ class PentestApp:
              messagebox.showwarning("Copy Error", "Cannot copy an error message from command preview.")
         else:
             messagebox.showinfo("Copy Info", "No command to copy.")
+
+    def find_next_in_output(self):
+        query = self.search_var.get()
+        if not query:
+            return
+        self.output_text.tag_configure("search_highlight", background="#ffeb3b", foreground="black")
+        start_index = self._last_search_index or "1.0"
+        self.output_text.focus_set()
+        idx = self.output_text.search(query, start_index, stopindex=tk.END)
+        if not idx:
+            # Wrap to start
+            idx = self.output_text.search(query, "1.0", stopindex=tk.END)
+            if not idx:
+                self.status_label.config(text="Status: Not found")
+                return
+        lastidx = f"{idx}+{len(query)}c"
+        self.output_text.tag_remove("search_highlight", "1.0", tk.END)
+        self.output_text.tag_add("search_highlight", idx, lastidx)
+        self.output_text.see(idx)
+        self._last_search_index = lastidx
+
+    def clear_search_highlights(self):
+        self.output_text.tag_remove("search_highlight", "1.0", tk.END)
+        self._last_search_index = None
 
     def on_tool_selected(self, event=None):
         try:
@@ -304,8 +386,7 @@ class PentestApp:
             if hasattr(self, label_attr_name_iter):
                 getattr(self, label_attr_name_iter).grid_remove()
 
-        tool_executable_key = tool_name_display.lower().replace(" ", "")
-        if tool_executable_key == "johntheripper": tool_executable_key = "john"
+        tool_executable_key = _normalize_tool_key(tool_name_display)
 
         if not FOUND_EXECUTABLES.get(tool_executable_key):
             self.start_button.config(state=tk.DISABLED)
@@ -402,8 +483,7 @@ class PentestApp:
 
     def _get_command_for_current_tool(self):
         tool_name_display = self.current_tool_name.get()
-        tool_name_key = tool_name_display.lower().replace(" ", "")
-        if tool_name_key == "johntheripper": tool_name_key = "john"
+        tool_name_key = _normalize_tool_key(tool_name_display)
         
         base_executable_cmd = FOUND_EXECUTABLES.get(tool_name_key)
         if not base_executable_cmd:
@@ -417,14 +497,25 @@ class PentestApp:
             cmd_list.extend(tool_specific_args)
         else:
             raise ValueError(f"Command builder not found for {tool_name_display}")
+        # Append extra args if provided
+        extra = self.extra_args_var.get().strip()
+        if extra:
+            try:
+                extra_tokens = shlex.split(extra)
+                cmd_list.extend(extra_tokens)
+            except Exception as e:
+                raise ValueError(f"Invalid extra args: {e}")
             
         return cmd_list
 
     def update_command_preview(self, event=None):
         try:
             cmd_list = self._get_command_for_current_tool()
-            quoted_cmd_list = [shlex.quote(str(item)) for item in cmd_list]
-            preview_text = " ".join(quoted_cmd_list)
+            if hasattr(shlex, 'join'):
+                preview_text = shlex.join([str(item) for item in cmd_list])
+            else:
+                quoted_cmd_list = [shlex.quote(str(item)) for item in cmd_list]
+                preview_text = " ".join(quoted_cmd_list)
             self.cmd_preview_var.set(preview_text)
         except ValueError as e:
             self.cmd_preview_var.set(f"Error: {e}")
@@ -448,8 +539,7 @@ class PentestApp:
             return
 
         current_tool_display_name = self.current_tool_name.get()
-        current_tool_key = current_tool_display_name.lower().replace(" ", "")
-        if current_tool_key == "johntheripper": current_tool_key = "john"
+        current_tool_key = _normalize_tool_key(current_tool_display_name)
         
         if not FOUND_EXECUTABLES.get(current_tool_key):
              messagebox.showerror("Tool Not Found", f"{current_tool_display_name} executable not found. Cannot start scan.")
@@ -464,6 +554,9 @@ class PentestApp:
             self.output_text.insert(tk.END, f"Starting {current_tool_display_name}: {cmd_display_for_log}\n\n", ("info",))
             self.output_text.configure(state='disabled')
             self.set_scan_state(running=True, status=f"Running {current_tool_display_name}...")
+
+            # Record run start
+            self._record_run_start(current_tool_display_name, args_list)
 
             self.stop_event.clear()
             while not self.output_queue.empty(): self.output_queue.get_nowait()
@@ -506,15 +599,27 @@ class PentestApp:
         if proc_to_stop and proc_to_stop.poll() is None:
             self.insert_output_line(f"\n--- Sending terminate signal to {tool_name} (PID: {proc_to_stop.pid}) ---", ("info",))
             try:
-                proc_to_stop.terminate()
+                if os.name == 'posix':
+                    try:
+                        os.killpg(os.getpgid(proc_to_stop.pid), signal.SIGTERM)
+                    except Exception:
+                        proc_to_stop.terminate()
+                else:
+                    proc_to_stop.terminate()
                 try:
-                    proc_to_stop.wait(timeout=1) 
+                    proc_to_stop.wait(timeout=1)
                 except subprocess.TimeoutExpired:
-                     self.insert_output_line(f"\n--- {tool_name} process did not terminate quickly, sending kill signal ---", ("error",))
-                     proc_to_stop.kill()
-                     try:
-                        proc_to_stop.wait(timeout=1) 
-                     except subprocess.TimeoutExpired:
+                    self.insert_output_line(f"\n--- {tool_name} process did not terminate quickly, sending kill signal ---", ("error",))
+                    if os.name == 'posix':
+                        try:
+                            os.killpg(os.getpgid(proc_to_stop.pid), signal.SIGKILL)
+                        except Exception:
+                            proc_to_stop.kill()
+                    else:
+                        proc_to_stop.kill()
+                    try:
+                        proc_to_stop.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
                         self.insert_output_line(f"\n--- {tool_name} process did not die after kill signal. ---", ("error",))
             except Exception as e:
                  self.insert_output_line(f"\n--- Error trying to stop {tool_name} process: {e} ---", ("error",))
@@ -561,6 +666,253 @@ class PentestApp:
                 messagebox.showinfo("Export Successful", f"Output saved to:\n{filepath}")
             except Exception as e:
                 messagebox.showerror("Export Error", f"Failed to save file:\n{e}")
+
+    def export_results_html(self):
+        output_content = self.output_text.get("1.0", tk.END)
+        if not output_content.strip():
+            messagebox.showwarning("Export Empty", "There is no output to export.")
+            return
+        filepath = filedialog.asksaveasfilename(
+            title="Save Output as HTML",
+            defaultextension=".html",
+            filetypes=(("HTML files", "*.html"), ("All files", "*.*"))
+        )
+        if not filepath:
+            return
+        try:
+            tool = self.current_tool_name.get()
+            cmd_preview = self.cmd_preview_var.get()
+            timestamp = datetime.datetime.now().isoformat(timespec='seconds')
+            html = f"""<!DOCTYPE html>
+<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Redboar Output</title>
+<style>body{{font-family:monospace;white-space:pre-wrap}}.meta{{font-family:sans-serif;white-space:normal;background:#f5f5f5;padding:8px;margin-bottom:8px;border:1px solid #ddd}}</style>
+</head><body>
+<div class=\"meta\"><strong>Tool:</strong> {tool}<br><strong>When:</strong> {timestamp}<br><strong>Command:</strong> {cmd_preview}</div>
+<pre>{self._escape_html(output_content)}</pre>
+</body></html>"""
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(html)
+            messagebox.showinfo("Export Successful", f"HTML saved to:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to save HTML file:\n{e}")
+
+    @staticmethod
+    def _escape_html(text: str) -> str:
+        return (text
+                .replace('&', '&amp;')
+                .replace('<', '&lt;')
+                .replace('>', '&gt;'))
+
+    # Profiles and state persistence
+    @property
+    def _config_dir(self) -> Path:
+        return Path.home() / ".config" / "redboar"
+
+    @property
+    def _profiles_path(self) -> Path:
+        return self._config_dir / "profiles.json"
+
+    @property
+    def _state_path(self) -> Path:
+        return self._config_dir / "state.json"
+
+    @property
+    def _runs_path(self) -> Path:
+        return self._config_dir / "runs.jsonl"
+
+    def _ensure_config_dir(self):
+        try:
+            self._config_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.warning("Failed to create config dir: %s", e)
+
+    def save_profile(self):
+        name = simpledialog.askstring("Save Profile", "Enter profile name:")
+        if not name:
+            return
+        self._ensure_config_dir()
+        profile = self._collect_state(include_current_tool=True)
+        try:
+            data = {}
+            if self._profiles_path.exists():
+                with open(self._profiles_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            data[name] = profile
+            with open(self._profiles_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            messagebox.showinfo("Profile Saved", f"Profile '{name}' saved.")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save profile:\n{e}")
+
+    def load_profile(self):
+        name = simpledialog.askstring("Load Profile", "Enter profile name:")
+        if not name:
+            return
+        try:
+            if not self._profiles_path.exists():
+                messagebox.showwarning("Load Profile", "No profiles found.")
+                return
+            with open(self._profiles_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            profile = data.get(name)
+            if not profile:
+                messagebox.showwarning("Load Profile", f"Profile '{name}' not found.")
+                return
+            self._apply_state(profile)
+            self.update_command_preview()
+            messagebox.showinfo("Profile Loaded", f"Profile '{name}' loaded.")
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to load profile:\n{e}")
+
+    def _collect_state(self, include_current_tool: bool = False) -> dict:
+        state = {
+            "extra_args": self.extra_args_var.get(),
+            "tools": {
+                "Gobuster": {
+                    "mode": getattr(self, 'gobuster_current_mode_var', tk.StringVar(value='Directory/File')).get(),
+                    "target": getattr(self, 'gobuster_target_var', tk.StringVar()).get(),
+                    "wordlist": getattr(self, 'gobuster_wordlist_var', tk.StringVar()).get(),
+                    "threads": getattr(self, 'gobuster_threads_var', tk.StringVar(value='10')).get(),
+                    "extensions": getattr(self, 'gobuster_extensions_var', tk.StringVar()).get(),
+                    "status_codes": getattr(self, 'gobuster_status_codes_var', tk.StringVar()).get(),
+                },
+                "Nmap": {
+                    "target": getattr(self, 'nmap_target_var', tk.StringVar()).get(),
+                    "ports": getattr(self, 'nmap_ports_var', tk.StringVar()).get(),
+                    "scan_types": {k: v.get() for k, v in getattr(self, 'nmap_scan_type_vars', {}).items()},
+                    "ping_scan": getattr(self, 'nmap_ping_scan_var', tk.BooleanVar()).get(),
+                    "no_ping": getattr(self, 'nmap_no_ping_var', tk.BooleanVar(value=True)).get(),
+                    "os_detect": getattr(self, 'nmap_os_detect_var', tk.BooleanVar(value=True)).get(),
+                    "version_detect": getattr(self, 'nmap_version_detect_var', tk.BooleanVar(value=True)).get(),
+                    "fast_scan": getattr(self, 'nmap_fast_scan_var', tk.BooleanVar()).get(),
+                    "verbose": getattr(self, 'nmap_verbose_var', tk.BooleanVar(value=True)).get(),
+                },
+                "SQLMap": {
+                    "target": getattr(self, 'sqlmap_target_var', tk.StringVar()).get(),
+                    "batch": getattr(self, 'sqlmap_batch_var', tk.BooleanVar(value=True)).get(),
+                    "dbs": getattr(self, 'sqlmap_dbs_var', tk.BooleanVar()).get(),
+                    "current_db": getattr(self, 'sqlmap_current_db_var', tk.BooleanVar()).get(),
+                    "tables": getattr(self, 'sqlmap_tables_var', tk.BooleanVar()).get(),
+                    "dump": getattr(self, 'sqlmap_dump_var', tk.BooleanVar()).get(),
+                    "db_name": getattr(self, 'sqlmap_db_name_var', tk.StringVar()).get(),
+                    "table_name": getattr(self, 'sqlmap_table_name_var', tk.StringVar()).get(),
+                    "level": getattr(self, 'sqlmap_level_var', tk.StringVar(value='1')).get(),
+                    "risk": getattr(self, 'sqlmap_risk_var', tk.StringVar(value='1')).get(),
+                },
+                "Nikto": {
+                    "target": getattr(self, 'nikto_target_var', tk.StringVar()).get(),
+                    "format": getattr(self, 'nikto_format_var', tk.StringVar(value='txt')).get(),
+                    "tuning": getattr(self, 'nikto_tuning_var', tk.StringVar(value='x 123b')).get(),
+                    "ssl": getattr(self, 'nikto_ssl_var', tk.BooleanVar()).get(),
+                    "ask_no": getattr(self, 'nikto_ask_no_var', tk.BooleanVar(value=True)).get(),
+                },
+                "John the Ripper": {
+                    "hash_file": getattr(self, 'john_hash_file_var', tk.StringVar()).get(),
+                    "wordlist": getattr(self, 'john_wordlist_var', tk.StringVar()).get(),
+                    "format": getattr(self, 'john_format_var', tk.StringVar()).get(),
+                    "session": getattr(self, 'john_session_var', tk.StringVar()).get(),
+                    "show": getattr(self, 'john_show_cracked_var', tk.BooleanVar()).get(),
+                },
+            }
+        }
+        if include_current_tool:
+            state["current_tool"] = self.current_tool_name.get()
+        return state
+
+    def _apply_state(self, state: dict):
+        try:
+            self.extra_args_var.set(state.get("extra_args", ""))
+            tools = state.get("tools", {})
+            g = tools.get("Gobuster", {})
+            if g:
+                self.gobuster_current_mode_var.set(g.get("mode", self.gobuster_current_mode_var.get()))
+                self.gobuster_target_var.set(g.get("target", ""))
+                self.gobuster_wordlist_var.set(g.get("wordlist", ""))
+                self.gobuster_threads_var.set(g.get("threads", self.gobuster_threads_var.get()))
+                self.gobuster_extensions_var.set(g.get("extensions", ""))
+                self.gobuster_status_codes_var.set(g.get("status_codes", self.gobuster_status_codes_var.get()))
+            n = tools.get("Nmap", {})
+            if n:
+                self.nmap_target_var.set(n.get("target", ""))
+                self.nmap_ports_var.set(n.get("ports", ""))
+                scan_types = n.get("scan_types", {})
+                for k, var in getattr(self, 'nmap_scan_type_vars', {}).items():
+                    var.set(bool(scan_types.get(k, var.get())))
+                self.nmap_ping_scan_var.set(n.get("ping_scan", self.nmap_ping_scan_var.get()))
+                self.nmap_no_ping_var.set(n.get("no_ping", self.nmap_no_ping_var.get()))
+                self.nmap_os_detect_var.set(n.get("os_detect", self.nmap_os_detect_var.get()))
+                self.nmap_version_detect_var.set(n.get("version_detect", self.nmap_version_detect_var.get()))
+                self.nmap_fast_scan_var.set(n.get("fast_scan", self.nmap_fast_scan_var.get()))
+                self.nmap_verbose_var.set(n.get("verbose", self.nmap_verbose_var.get()))
+            s = tools.get("SQLMap", {})
+            if s:
+                self.sqlmap_target_var.set(s.get("target", ""))
+                self.sqlmap_batch_var.set(s.get("batch", self.sqlmap_batch_var.get()))
+                self.sqlmap_dbs_var.set(s.get("dbs", self.sqlmap_dbs_var.get()))
+                self.sqlmap_current_db_var.set(s.get("current_db", self.sqlmap_current_db_var.get()))
+                self.sqlmap_tables_var.set(s.get("tables", self.sqlmap_tables_var.get()))
+                self.sqlmap_dump_var.set(s.get("dump", self.sqlmap_dump_var.get()))
+                self.sqlmap_db_name_var.set(s.get("db_name", self.sqlmap_db_name_var.get()))
+                self.sqlmap_table_name_var.set(s.get("table_name", self.sqlmap_table_name_var.get()))
+                self.sqlmap_level_var.set(s.get("level", self.sqlmap_level_var.get()))
+                self.sqlmap_risk_var.set(s.get("risk", self.sqlmap_risk_var.get()))
+            k = tools.get("Nikto", {})
+            if k:
+                self.nikto_target_var.set(k.get("target", ""))
+                self.nikto_format_var.set(k.get("format", self.nikto_format_var.get()))
+                self.nikto_tuning_var.set(k.get("tuning", self.nikto_tuning_var.get()))
+                self.nikto_ssl_var.set(k.get("ssl", self.nikto_ssl_var.get()))
+                self.nikto_ask_no_var.set(k.get("ask_no", self.nikto_ask_no_var.get()))
+            j = tools.get("John the Ripper", {})
+            if j:
+                self.john_hash_file_var.set(j.get("hash_file", ""))
+                self.john_wordlist_var.set(j.get("wordlist", ""))
+                self.john_format_var.set(j.get("format", ""))
+                self.john_session_var.set(j.get("session", ""))
+                self.john_show_cracked_var.set(j.get("show", self.john_show_cracked_var.get()))
+            if state.get("current_tool") in self.tool_frames:
+                desired = state.get("current_tool")
+                idx = list(self.tool_frames.keys()).index(desired)
+                self.main_notebook.select(idx)
+        except Exception as e:
+            logger.warning("Failed to apply state: %s", e)
+
+    def _load_state(self):
+        try:
+            if self._state_path.exists():
+                with open(self._state_path, 'r', encoding='utf-8') as f:
+                    state = json.load(f)
+                self._apply_state(state)
+        except Exception as e:
+            logger.warning("Failed to load state: %s", e)
+
+    def _save_state(self):
+        try:
+            self._ensure_config_dir()
+            state = self._collect_state(include_current_tool=True)
+            with open(self._state_path, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.warning("Failed to save state: %s", e)
+
+    def _record_run_start(self, tool_name: str, cmd: list):
+        try:
+            self._ensure_config_dir()
+            entry = {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "tool": tool_name,
+                "command": cmd,
+            }
+            with open(self._runs_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            logger.debug("Failed to record run: %s", e)
+
+    def on_close(self):
+        try:
+            self._save_state()
+        finally:
+            self.master.destroy()
 
 def display_tool_installation_guidance(missing_tool_info):
     title = "Missing Tools - Installation Guidance"
@@ -609,4 +961,8 @@ if __name__ == '__main__':
 
     root.deiconify()
     app = PentestApp(root)
+    # Load last state if available
+    app._load_state()
+    # Ensure state is saved on exit
+    root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
