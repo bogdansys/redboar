@@ -3,6 +3,20 @@ from tkinter import ttk
 
 def create_ui(parent_frame, app_instance):
     parent_frame.columnconfigure(1, weight=1)
+
+    tutorial = ttk.LabelFrame(parent_frame, text="Tutorial", padding="6")
+    tutorial.grid(row=0, column=0, columnspan=3, sticky="ew", padx=5, pady=(0,6))
+    ttk.Label(
+        tutorial,
+        text=(
+            "Nikto performs baseline web vuln scans.\n"
+            "- Target: Host or URL. Format/Tuning optional; SSL forces HTTPS.\n"
+            "- Disable prompts with -ask no for automation.\n"
+            "Check Command → Preview, then Start."
+        ),
+        justify="left",
+        wraplength=700,
+    ).grid(row=0, column=0, sticky="w")
     ttk.Label(parent_frame, text="Target Host/URL (-h):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
     app_instance.nikto_target_var = tk.StringVar()
     app_instance.nikto_target_entry = ttk.Entry(parent_frame, textvariable=app_instance.nikto_target_var, width=50)

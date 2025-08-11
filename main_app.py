@@ -15,6 +15,8 @@ import signal
 import json
 
 from pathlib import Path
+from shutil import which
+import math
 
 import config
 import ui_gobuster
@@ -22,6 +24,7 @@ import ui_nmap
 import ui_sqlmap
 import ui_nikto
 import ui_john
+import ai_ui
 
 FOUND_EXECUTABLES = {}
 
@@ -161,12 +164,33 @@ class PentestApp:
         master.geometry("1000x800")
         master.minsize(850, 700)
 
+        # App icon (same logo as README). Keep a reference to avoid GC
+        try:
+            self._icon_image = tk.PhotoImage(file="icon.png")
+            self.master.iconphoto(True, self._icon_image)
+            # Create a smaller display version for header to avoid huge layouts
+            try:
+                w, h = self._icon_image.width(), self._icon_image.height()
+                scale = max(1, int(max(w / 64, h / 64)))
+                self._logo_display_image = self._icon_image.subsample(scale, scale)
+            except Exception:
+                self._logo_display_image = self._icon_image
+        except Exception:
+            pass
+
         self.style = ttk.Style()
         available_themes = self.style.theme_names()
         if 'clam' in available_themes: self.style.theme_use('clam')
         elif 'alt' in available_themes: self.style.theme_use('alt')
         # Style for missing-tool labels
         self.style.configure("tool_not_found_msg.TLabel", foreground="red", font=("TkDefaultFont", 10, "italic"))
+        self.style.configure("section.TLabelframe.Label", font=("TkDefaultFont", 10, "bold"))
+        self.style.configure("Heading.TLabel", font=("TkDefaultFont", 10, "bold"))
+        self.style.configure("AppTitle.TLabel", font=("TkDefaultFont", 16, "bold"))
+
+        # Theme state
+        self.current_theme_name = tk.StringVar(value="Neubrutalist")
+        self._apply_theme(self.current_theme_name.get())
 
         self.proc_thread = None
         self.output_queue = queue.Queue()
@@ -185,11 +209,12 @@ class PentestApp:
         self.on_tool_selected()
 
         master.columnconfigure(0, weight=1)
-        master.rowconfigure(0, weight=0) 
-        master.rowconfigure(1, weight=0) 
-        master.rowconfigure(2, weight=0) 
-        master.rowconfigure(3, weight=1) 
-        master.rowconfigure(4, weight=0) 
+        master.rowconfigure(0, weight=0)  # header
+        master.rowconfigure(1, weight=0)  # tabs
+        master.rowconfigure(2, weight=0)  # command
+        master.rowconfigure(3, weight=0)  # progress
+        master.rowconfigure(4, weight=1)  # output
+        master.rowconfigure(5, weight=0)  # controls
 
         self._configure_output_tags()
 
@@ -209,6 +234,16 @@ class PentestApp:
         help_menu = tk.Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="About Redboar", command=self.show_about_dialog)
+
+        view_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="View", menu=view_menu)
+        for theme_name in ("Glass", "Brutalist", "Neubrutalist"):
+            view_menu.add_radiobutton(
+                label=theme_name,
+                variable=self.current_theme_name,
+                value=theme_name,
+                command=lambda: self._apply_theme(self.current_theme_name.get())
+            )
 
         profiles_menu = tk.Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Profiles", menu=profiles_menu)
@@ -251,9 +286,55 @@ class PentestApp:
         self.output_text.tag_configure("john_status", foreground="grey")
         self.output_text.tag_configure("tool_not_found_msg", foreground="red", font=("TkFixedFont", 10, "italic"))
 
+    def _apply_theme(self, theme_name: str):
+        # Base palettes
+        if theme_name == "Glass":
+            bg = "#f5f7fb"; card = "#ffffff"; border = "#e0e6f0"; text = "#111111"; accent = "#4f46e5"
+            btn_bg = "#eef1f8"; btn_fg = text
+        elif theme_name == "Brutalist":
+            bg = "#ffffff"; card = "#ffffff"; border = "#111111"; text = "#111111"; accent = "#ff3b30"
+            btn_bg = "#ffe8e6"; btn_fg = text
+        else:  # Neubrutalist default
+            bg = "#f8fafc"; card = "#ffffff"; border = "#0f172a"; text = "#0f172a"; accent = "#0ea5e9"
+            btn_bg = "#e6f6fd"; btn_fg = text
+
+        try:
+            self.master.configure(bg=bg)
+        except Exception:
+            pass
+        for cls in ("TFrame", "TLabelframe", "TNotebook", "TLabel"):
+            self.style.configure(cls, background=bg, foreground=text)
+        self.style.configure("section.TLabelframe", background=bg)
+        self.style.configure("TLabelframe", bordercolor=border)
+        self.style.configure("TEntry", fieldbackground=card, background=card, foreground=text)
+        self.style.configure("TCombobox", fieldbackground=card, background=card, foreground=text)
+        self.style.configure("TButton", background=btn_bg, foreground=btn_fg, padding=6, borderwidth=2, focusthickness=3, focuscolor=accent)
+        self.style.map("TButton", background=[("active", accent)], foreground=[("active", "#ffffff")])
+        self.style.configure("TNotebook.Tab", padding=(10, 4))
+        self.style.map("TNotebook.Tab", background=[("selected", card)], foreground=[("selected", text)])
+
+        # Scrolled output text widget background/fg
+        try:
+            if hasattr(self, "output_text"):
+                self.output_text.configure(bg=card, fg=text, insertbackground=text)
+        except Exception:
+            pass
+
     def create_widgets(self):
+        # Header with logo and title
+        header = ttk.Frame(self.master, padding="8 6")
+        header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8,4))
+        header.columnconfigure(1, weight=1)
+        try:
+            if hasattr(self, "_logo_display_image"):
+                logo_label = ttk.Label(header, image=self._logo_display_image)
+                logo_label.grid(row=0, column=0, sticky="w")
+        except Exception:
+            pass
+        ttk.Label(header, text="Redboar Pentesting GUI", style="AppTitle.TLabel").grid(row=0, column=1, sticky="w", padx=(8,0))
+
         self.main_notebook = ttk.Notebook(self.master, padding="5")
-        self.main_notebook.grid(row=0, column=0, columnspan=2, sticky="new", padx=5, pady=5)
+        self.main_notebook.grid(row=1, column=0, columnspan=2, sticky="new", padx=8, pady=(0,4))
         self.main_notebook.bind("<<NotebookTabChanged>>", self.on_tool_selected)
 
         self.tool_frames = {}
@@ -274,62 +355,68 @@ class PentestApp:
             not_found_label = ttk.Label(frame, text=f"{name} executable not found. Please install it or check your PATH.", style="tool_not_found_msg.TLabel")
             setattr(self, f"{name.lower().replace(' ', '_').replace('-', '_')}_not_found_label", not_found_label)
 
-        cmd_preview_frame = ttk.Frame(self.master, padding="5 0")
-        cmd_preview_frame.grid(row=1, column=0, sticky="ew", padx=5)
-        cmd_preview_frame.columnconfigure(1, weight=1)
-        
-        ttk.Label(cmd_preview_frame, text="Command Preview:").grid(row=0, column=0, sticky="w", padx=(0,5))
-        self.cmd_preview_var = tk.StringVar()
-        cmd_entry = ttk.Entry(cmd_preview_frame, textvariable=self.cmd_preview_var, state="readonly", font=("TkFixedFont", 10))
-        cmd_entry.grid(row=0, column=1, sticky="ew")
-        
-        self.copy_cmd_button = ttk.Button(cmd_preview_frame, text="Copy", command=self.copy_command_to_clipboard, width=8)
-        self.copy_cmd_button.grid(row=0, column=2, sticky="e", padx=(5,0))
+        # AI Assistant Tab
+        ai_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(ai_frame, text=' AI Assistant ')
+        ai_ui.create_ai_tab(ai_frame, self)
 
-        ttk.Label(cmd_preview_frame, text="Extra Args:").grid(row=1, column=0, sticky="w", padx=(0,5), pady=(5,0))
-        extra_entry = ttk.Entry(cmd_preview_frame, textvariable=self.extra_args_var, font=("TkFixedFont", 10))
-        extra_entry.grid(row=1, column=1, sticky="ew", pady=(5,0))
-        ttk.Button(cmd_preview_frame, text="Clear", width=8, command=lambda: (self.extra_args_var.set(""), self.update_command_preview())).grid(row=1, column=2, sticky="e", padx=(5,0), pady=(5,0))
+        cmd_group = ttk.Labelframe(self.master, text="Command", padding="8", style="section.TLabelframe")
+        cmd_group.grid(row=2, column=0, sticky="ew", padx=8, pady=(0,6))
+        cmd_group.columnconfigure(1, weight=1)
+
+        ttk.Label(cmd_group, text="Preview:", style="Heading.TLabel").grid(row=0, column=0, sticky="w", padx=(0,6), pady=(0,2))
+        self.cmd_preview_var = tk.StringVar()
+        cmd_entry = ttk.Entry(cmd_group, textvariable=self.cmd_preview_var, state="readonly", font=("TkFixedFont", 10))
+        cmd_entry.grid(row=0, column=1, sticky="ew")
+        self.copy_cmd_button = ttk.Button(cmd_group, text="Copy", command=self.copy_command_to_clipboard, width=8)
+        self.copy_cmd_button.grid(row=0, column=2, sticky="e", padx=(6,0))
+
+        ttk.Label(cmd_group, text="Extra Args:").grid(row=1, column=0, sticky="w", padx=(0,6), pady=(6,0))
+        extra_entry = ttk.Entry(cmd_group, textvariable=self.extra_args_var, font=("TkFixedFont", 10))
+        extra_entry.grid(row=1, column=1, sticky="ew", pady=(6,0))
+        ttk.Button(cmd_group, text="Clear", width=8, command=lambda: (self.extra_args_var.set(""), self.update_command_preview())).grid(row=1, column=2, sticky="e", padx=(6,0), pady=(6,0))
         self.extra_args_var.trace_add("write", lambda *args: self.update_command_preview())
 
         self.progress_bar = ttk.Progressbar(self.master, mode='indeterminate', length=200)
-        self.progress_bar.grid(row=2, column=0, sticky="ew", padx=5, pady=(5, 5))
+        self.progress_bar.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 6))
         self.progress_bar.grid_remove()
 
-        output_frame = ttk.Frame(self.master, padding="5")
-        output_frame.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
-        output_frame.rowconfigure(1, weight=1)
-        output_frame.columnconfigure(0, weight=1)
+        output_group = ttk.Labelframe(self.master, text="Output", padding="8", style="section.TLabelframe")
+        output_group.grid(row=4, column=0, sticky="nsew", padx=8, pady=(0,8))
+        output_group.rowconfigure(1, weight=1)
+        output_group.columnconfigure(0, weight=1)
 
-        search_bar = ttk.Frame(output_frame)
-        search_bar.grid(row=0, column=0, sticky="ew", pady=(0,5))
+        search_bar = ttk.Frame(output_group)
+        search_bar.grid(row=0, column=0, sticky="ew", pady=(0,6))
         search_bar.columnconfigure(1, weight=1)
         ttk.Label(search_bar, text="Search:").grid(row=0, column=0, sticky="w")
         self.search_entry = ttk.Entry(search_bar, textvariable=self.search_var, font=("TkFixedFont", 10))
-        self.search_entry.grid(row=0, column=1, sticky="ew", padx=(5,5))
+        self.search_entry.grid(row=0, column=1, sticky="ew", padx=(6,6))
         ttk.Button(search_bar, text="Find Next", command=self.find_next_in_output, width=10).grid(row=0, column=2)
-        ttk.Button(search_bar, text="Clear Highlights", command=self.clear_search_highlights, width=16).grid(row=0, column=3, padx=(5,0))
+        ttk.Button(search_bar, text="Clear Highlights", command=self.clear_search_highlights, width=16).grid(row=0, column=3, padx=(6,0))
 
-        self.output_text = scrolledtext.ScrolledText(output_frame, wrap=tk.WORD, height=15, font=("TkFixedFont", 10))
+        self.output_text = scrolledtext.ScrolledText(output_group, wrap=tk.WORD, height=15, font=("TkFixedFont", 10))
         self.output_text.grid(row=1, column=0, sticky="nsew")
         self.output_text.configure(state='disabled')
 
-        control_frame = ttk.Frame(self.master, padding="10 5")
-        control_frame.grid(row=4, column=0, sticky="ew", padx=5, pady=5)
-        control_frame.columnconfigure(4, weight=1)
+        control_frame = ttk.Frame(self.master, padding="8 6")
+        control_frame.grid(row=5, column=0, sticky="ew", padx=8, pady=(0,8))
+        # Spacer column grows, buttons align left, status right
+        control_frame.columnconfigure(0, weight=1)
+        control_frame.columnconfigure(8, weight=0)
 
-        self.start_button = ttk.Button(control_frame, text="Start Scan", command=self.start_scan, width=12)
-        self.start_button.grid(row=0, column=0, padx=5)
-        self.stop_button = ttk.Button(control_frame, text="Stop Scan", command=self.stop_scan, state=tk.DISABLED, width=12)
-        self.stop_button.grid(row=0, column=1, padx=5)
-        self.clear_button = ttk.Button(control_frame, text="Clear Output", command=self.clear_output, width=12)
-        self.clear_button.grid(row=0, column=2, padx=5)
-        self.export_button = ttk.Button(control_frame, text="Export Output", command=self.export_results, width=12)
-        self.export_button.grid(row=0, column=3, padx=5)
-        self.export_html_button = ttk.Button(control_frame, text="Export HTML", command=self.export_results_html, width=12)
-        self.export_html_button.grid(row=0, column=4, padx=5)
+        self.start_button = ttk.Button(control_frame, text="Start Scan", command=self.start_scan, width=14)
+        self.start_button.grid(row=0, column=1, padx=4)
+        self.stop_button = ttk.Button(control_frame, text="Stop Scan", command=self.stop_scan, state=tk.DISABLED, width=14)
+        self.stop_button.grid(row=0, column=2, padx=4)
+        self.clear_button = ttk.Button(control_frame, text="Clear Output", command=self.clear_output, width=14)
+        self.clear_button.grid(row=0, column=3, padx=4)
+        self.export_button = ttk.Button(control_frame, text="Export Text", command=self.export_results, width=14)
+        self.export_button.grid(row=0, column=4, padx=4)
+        self.export_html_button = ttk.Button(control_frame, text="Export HTML", command=self.export_results_html, width=14)
+        self.export_html_button.grid(row=0, column=5, padx=4)
         self.status_label = ttk.Label(control_frame, text="Status: Idle", anchor="e")
-        self.status_label.grid(row=0, column=5, sticky="e", padx=5)
+        self.status_label.grid(row=0, column=8, sticky="e", padx=4)
 
     def copy_command_to_clipboard(self):
         command = self.cmd_preview_var.get()
@@ -937,6 +1024,39 @@ def display_tool_installation_guidance(missing_tool_info):
     message += "\nFunctionality for these tools will be unavailable or may fail until they are installed and accessible in your system PATH, or their paths are configured in config.py (by editing EXECUTABLE_PATHS)."
     messagebox.showwarning(title, message)
 
+def attempt_auto_install_missing_tools(missing_tool_info):
+    try:
+        # Only attempt on apt-based distros (e.g., Kali)
+        if not (sys.platform.startswith('linux') and which('apt')):
+            return False
+        tools_to_install = []
+        for tool_key, _display_name in missing_tool_info:
+            pkg = config.COMMON_PACKAGE_NAMES.get(tool_key)
+            if pkg:
+                tools_to_install.append(pkg)
+        if not tools_to_install:
+            return False
+        confirm = messagebox.askyesno(
+            "Install Missing Tools",
+            "Some tools are missing. On Kali/apt systems I can install them automatically with sudo.\n\n"
+            f"Packages to install: {', '.join(tools_to_install)}\n\nProceed?")
+        if not confirm:
+            return False
+        # Run apt install
+        import subprocess as _sp
+        cmd = ["sudo", "apt", "update"]
+        _sp.run(cmd, check=False)
+        cmd = ["sudo", "apt", "install", "-y", *tools_to_install]
+        _sp.run(cmd, check=False)
+        # Re-detect executables
+        for tool_key in config.EXECUTABLE_PATHS.keys():
+            FOUND_EXECUTABLES[tool_key] = None
+            find_executable(tool_key)
+        return True
+    except Exception as e:
+        logger.warning("Auto-install failed: %s", e)
+        return False
+
 if __name__ == '__main__':
     try:
         root = tk.Tk()
@@ -957,7 +1077,9 @@ if __name__ == '__main__':
              missing_tool_details.append((tool_key, display_name))
     
     if missing_tool_details:
-        display_tool_installation_guidance(missing_tool_details)
+        installed = attempt_auto_install_missing_tools(missing_tool_details)
+        if not installed:
+            display_tool_installation_guidance(missing_tool_details)
 
     root.deiconify()
     app = PentestApp(root)

@@ -1,0 +1,16 @@
+# Python packages (pip)
+# - This app uses only the Python standard library; no pip packages are required.
+
+# System packages (apt) required for full functionality (Kali/Ubuntu/Debian):
+# - python3
+# - python3-tk
+# - gobuster
+# - nmap
+# - sqlmap
+# - nikto
+# - perl        # required by nikto when using nikto.pl
+# - john        # John the Ripper
+
+# No external Python packages required.
+# GUI depends on system Tk. On Debian/Ubuntu/Kali install: sudo apt install -y python3-tk
+

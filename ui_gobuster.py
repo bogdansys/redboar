@@ -3,6 +3,22 @@ from tkinter import ttk
 
 def create_ui(parent_frame, app_instance):
     parent_frame.columnconfigure(1, weight=1)
+
+    # Tutorial
+    tutorial = ttk.LabelFrame(parent_frame, text="Tutorial", padding="6")
+    tutorial.grid(row=0, column=0, columnspan=3, sticky="ew", padx=5, pady=(0,6))
+    ttk.Label(
+        tutorial,
+        text=(
+            "Gobuster is a content discovery tool.\n"
+            "- Mode: dir (URLs), dns (subdomains), vhost (virtual hosts).\n"
+            "- Target: dir/vhost require http(s) URL; dns requires a domain.\n"
+            "- Wordlist: required. Threads, extensions, and status filters are optional.\n"
+            "Use Command → Preview to verify, then Start. Stop anytime; export output if needed."
+        ),
+        justify="left",
+        wraplength=700,
+    ).grid(row=0, column=0, sticky="w")
     
     ttk.Label(parent_frame, text="Mode:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
     app_instance.gobuster_modes = {'Directory/File': 'dir', 'DNS Subdomain': 'dns', 'Virtual Host': 'vhost'}

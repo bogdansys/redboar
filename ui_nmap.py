@@ -3,6 +3,20 @@ from tkinter import ttk
 
 def create_ui(parent_frame, app_instance):
     parent_frame.columnconfigure(1, weight=1)
+
+    tutorial = ttk.LabelFrame(parent_frame, text="Tutorial", padding="6")
+    tutorial.grid(row=0, column=0, columnspan=3, sticky="ew", padx=5, pady=(0,6))
+    ttk.Label(
+        tutorial,
+        text=(
+            "Nmap scans hosts/services.\n"
+            "- Targets: IP/CIDR/hostnames. Ports optional (e.g., 22,80 or 1-1000).\n"
+            "- Choose scan types or Ping Scan; enable OS/service detection for detail.\n"
+            "Use Command → Preview to verify, then Start."
+        ),
+        justify="left",
+        wraplength=700,
+    ).grid(row=0, column=0, sticky="w")
     ttk.Label(parent_frame, text="Target(s):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
     app_instance.nmap_target_var = tk.StringVar()
     app_instance.nmap_target_entry = ttk.Entry(parent_frame, textvariable=app_instance.nmap_target_var, width=50)

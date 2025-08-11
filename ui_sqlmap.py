@@ -3,6 +3,21 @@ from tkinter import ttk
 
 def create_ui(parent_frame, app_instance):
     parent_frame.columnconfigure(1, weight=1)
+
+    tutorial = ttk.LabelFrame(parent_frame, text="Tutorial", padding="6")
+    tutorial.grid(row=0, column=0, columnspan=3, sticky="ew", padx=5, pady=(0,6))
+    ttk.Label(
+        tutorial,
+        text=(
+            "SQLMap tests/dumps SQL injection.\n"
+            "- Target URL required. Use --batch for non-interactive.\n"
+            "- Enumeration: choose dbs/tables/dump and optionally DB/Table names.\n"
+            "- Tuning: Level/Risk control depth and noise.\n"
+            "Review Command → Preview, then Start."
+        ),
+        justify="left",
+        wraplength=700,
+    ).grid(row=0, column=0, sticky="w")
     ttk.Label(parent_frame, text="Target URL (-u):").grid(row=1, column=0, sticky="w", padx=5, pady=2)
     app_instance.sqlmap_target_var = tk.StringVar()
     app_instance.sqlmap_target_entry = ttk.Entry(parent_frame, textvariable=app_instance.sqlmap_target_var, width=50)
