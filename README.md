@@ -4,7 +4,7 @@
   <img src="icon.png" alt="Redboar icon" width="120" />
 </p>
 
-Redboar is a Linux-first, Python 3/Tkinter GUI that consolidates popular pentesting tools into a single interface. It features a modern, themeable UI (Glass/Brutalist/Neubrutalist), per‑tool command builders, and an AI Assistant with offline planning or ChatGPT integration.
+Redboar is a massive exploitation framework, fully open-source and Linux-first, designed to unify and extend the capabilities of tools like Nmap, Gobuster, SQLMap, Nikto, and John into a seamless offensive workflow. It provides advanced command builders with live previews, reusable profiles, and automated exports, while its integrated AI assistant (offline or ChatGPT) can strategize attack paths and auto-generate optimized commands.
 
 ## Supported Tools
 - Gobuster
