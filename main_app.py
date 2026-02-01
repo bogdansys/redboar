@@ -18,13 +18,28 @@ from pathlib import Path
 from shutil import which
 import math
 
-import config
-import ui_gobuster
-import ui_nmap
-import ui_sqlmap
-import ui_nikto
-import ui_john
-import ai_ui
+from core import config
+from ui import ui_gobuster
+from ui import ui_nmap
+from ui import ui_sqlmap
+from ui import ui_nikto
+from ui import ui_john
+from ui import ui_targets
+from ui import ui_graph
+from ui import ui_nuclei
+from ui import ui_searchsploit
+from ui import ui_hydra
+from ui import ui_revshell
+from ui import ui_dashboard
+from ui import ui_notes
+from ui import ai_ui
+
+from core import state_manager
+from core import parsers
+from core import graph_engine
+from core import automation_engine
+from core import report_generator
+from core import parsers
 
 FOUND_EXECUTABLES = {}
 
@@ -163,6 +178,15 @@ class PentestApp:
         master.title("Redboar Pentesting GUI")
         master.geometry("1000x800")
         master.minsize(850, 700)
+        
+        # Initialize State Manager
+        self.state_manager = state_manager.StateManager()
+        # Default project (or load last used if implemented later)
+        if not self.state_manager.current_project_id:
+             # Ensure a default exists or prompt. For now, let's create a default if none.
+             # Actually, better to let user create one, but for usability we can have a 'Scratchpad' project potentially.
+             # For simplicity phase 1: Just ensure user knows.
+             pass
 
         # App icon (same logo as README). Keep a reference to avoid GC
         try:
@@ -234,6 +258,15 @@ class PentestApp:
         help_menu = tk.Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="About Redboar", command=self.show_about_dialog)
+
+        project_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Project", menu=project_menu)
+        project_menu.add_command(label="New Project...", command=self.new_project_dialog)
+        project_menu.add_command(label="Open Project...", command=self.open_project_dialog)
+        project_menu.add_separator()
+        project_menu.add_separator()
+        project_menu.add_command(label="Generate Report (HTML)...", command=self.generate_report_dialog)
+        project_menu.add_command(label="Current Project Info", command=self.show_project_info)
 
         view_menu = tk.Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="View", menu=view_menu)
@@ -337,7 +370,15 @@ class PentestApp:
         self.main_notebook.grid(row=1, column=0, columnspan=2, sticky="new", padx=8, pady=(0,4))
         self.main_notebook.bind("<<NotebookTabChanged>>", self.on_tool_selected)
 
-        self.tool_frames = {}
+        # Dashboard Tab (New First Tab)
+        dash_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(dash_frame, text=' Dashboard ')
+        self.tool_frames["Dashboard"] = dash_frame
+        self.dash_ui_instance = ui_dashboard.create_ui(dash_frame, self)
+
+        self.tool_frames = {} if not hasattr(self, 'tool_frames') else self.tool_frames
+        
+        # Tool Tabs
         tool_tabs_config = [
             ("Gobuster", ui_gobuster.create_ui),
             ("Nmap", ui_nmap.create_ui),
@@ -354,6 +395,54 @@ class PentestApp:
             
             not_found_label = ttk.Label(frame, text=f"{name} executable not found. Please install it or check your PATH.", style="tool_not_found_msg.TLabel")
             setattr(self, f"{name.lower().replace(' ', '_').replace('-', '_')}_not_found_label", not_found_label)
+        
+        # Re-adding Targets tab
+        targets_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(targets_frame, text=' Targets ')
+        # Store it so we can refresh it later
+        self.tool_frames["Targets"] = targets_frame
+        ui_targets.create_ui(targets_frame, self)
+
+        # Graph Tab (New)
+        graph_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(graph_frame, text=' Network Graph ')
+        self.tool_frames["Graph"] = graph_frame
+        # We need to keep a ref to the graph UI instance to call load_data if we want auto-updates
+        self.graph_ui_instance = ui_graph.create_ui(graph_frame, self)
+
+        # Nuclei Tab
+        nuclei_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(nuclei_frame, text=' Nuclei ')
+        self.tool_frames["Nuclei"] = nuclei_frame
+        ui_nuclei.create_ui(nuclei_frame, self)
+        self.tool_ui_builders["Nuclei"] = ui_nuclei
+
+        # SearchSploit Tab
+        search_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(search_frame, text=' SearchSploit ')
+        self.tool_frames["SearchSploit"] = search_frame
+        ui_searchsploit.create_ui(search_frame, self)
+        self.tool_ui_builders["SearchSploit"] = ui_searchsploit
+
+        # Hydra Tab
+        hydra_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(hydra_frame, text=' Hydra ')
+        self.tool_frames["Hydra"] = hydra_frame
+        ui_hydra.create_ui(hydra_frame, self)
+        self.tool_ui_builders["Hydra"] = ui_hydra
+
+        # RevShell Tab
+        rev_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(rev_frame, text=' RevShell ')
+        self.tool_frames["RevShell"] = rev_frame
+        ui_revshell.create_ui(rev_frame, self)
+        self.tool_ui_builders["RevShell"] = ui_revshell
+
+        # Notes Tab
+        notes_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(notes_frame, text=' Notes ')
+        self.tool_frames["Notes"] = notes_frame
+        self.notes_ui_instance = ui_notes.create_ui(notes_frame, self)
 
         # AI Assistant Tab
         ai_frame = ttk.Frame(self.main_notebook, padding="10")
@@ -555,6 +644,32 @@ class PentestApp:
                 line = self.output_queue.get_nowait()
                 if line is None:
                     self.set_scan_state(running=False, status="Finished")
+                    
+                    # --- Post-Processing Hook ---
+                    # Check if we need to parse Nmap results
+                    if self.proc_thread_tool_name == "Nmap" and hasattr(self, 'nmap_xml_output_path') and self.nmap_xml_output_path:
+                         if os.path.exists(self.nmap_xml_output_path):
+                             try:
+                                 project_info = self.state_manager.get_current_project()
+                                 xml_output_path = self.nmap_xml_output_path
+                                 if project_info and project_info['id']:
+                                     from core import parsers # Lazy import
+                                     self.insert_output_line(f"\n[+] Parsing Nmap results into Project: {project_info['name']}...", ("info",))
+                                     parsers.parse_nmap_xml(xml_output_path, project_info['id'])
+                                     self.insert_output_line(f"[+] Parsing complete.", ("success",))
+                                     # Notify specific tab observer if exists (Phase 2 UI update)
+                                 else:
+                                     self.insert_output_line(f"\n[!] No active project selected. Results not saved to DB.", ("error",))
+                             except Exception as e:
+                                 self.insert_output_line(f"\n[!] Error parsing Nmap XML: {e}", ("error",))
+                             finally:
+                                 # Cleanup temp file
+                                 try:
+                                     os.remove(self.nmap_xml_output_path)
+                                     self.nmap_xml_output_path = None
+                                 except OSError:
+                                     pass
+
                     return
                 else:
                     self.output_text.configure(state='normal')
@@ -578,8 +693,8 @@ class PentestApp:
         
         cmd_list = list(base_executable_cmd)
         
-        tool_module = self.tool_ui_builders.get(tool_name_display)
         if tool_module and hasattr(tool_module, 'build_command'):
+            # Some build_commands might modify app state (like nmap xml path)
             tool_specific_args = tool_module.build_command(self)
             cmd_list.extend(tool_specific_args)
         else:
@@ -798,6 +913,81 @@ class PentestApp:
     @property
     def _profiles_path(self) -> Path:
         return self._config_dir / "profiles.json"
+    
+    def new_project_dialog(self):
+        name = simpledialog.askstring("New Project", "Enter Project Name:")
+        if name:
+            try:
+                self.state_manager.create_project(name)
+                self.title_update()
+                self.on_project_changed()
+                messagebox.showinfo("Project", f"Created and switched to project: {name}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to create project: {e}")
+
+    def open_project_dialog(self):
+        projects = self.state_manager.get_all_projects()
+        if not projects:
+            messagebox.showinfo("Project", "No projects found.")
+            return
+
+        # Simple list dialog
+        top = tk.Toplevel(self.master)
+        top.title("Open Project")
+        listbox = tk.Listbox(top, width=50)
+        listbox.pack(padx=10, pady=10)
+        
+        for p in projects:
+            listbox.insert(tk.END, f"{p['name']} (ID: {p['id']})")
+            
+        def select_proj():
+            sel = listbox.curselection()
+            if sel:
+                idx = sel[0]
+                proj = projects[idx]
+                self.state_manager.load_project(proj['id'])
+                self.title_update()
+                self.on_project_changed()
+                top.destroy()
+                messagebox.showinfo("Project", f"Switched to project: {proj['name']}")
+                
+        ttk.Button(top, text="Open", command=select_proj).pack(pady=5)
+
+    def show_project_info(self):
+        proj = self.state_manager.get_current_project()
+        if proj['id']:
+            messagebox.showinfo("Project Info", f"Active Project: {proj['name']}\nID: {proj['id']}")
+        else:
+            messagebox.showinfo("Project Info", "No active project.")
+
+    def title_update(self):
+         proj = self.state_manager.get_current_project()
+         title = "Redboar Pentesting GUI"
+         if proj['name']:
+             title += f" - [{proj['name']}]"
+         self.master.title(title)
+
+    def on_project_changed(self):
+        """Called when a project is created or loaded."""
+        try:
+            # Refresh Dashboard
+            if hasattr(self, 'dash_ui_instance'):
+                self.dash_ui_instance.refresh_stats()
+            
+            # Load Notes
+            if hasattr(self, 'notes_ui_instance'):
+                self.notes_ui_instance.load_notes()
+                
+            # Refresh Graph
+            if hasattr(self, 'graph_ui_instance'):
+                self.graph_ui_instance.load_data()
+                
+            # Log to output
+            proj = self.state_manager.get_current_project()
+            if proj['id']:
+                self.insert_output_line(f"[+] Loaded Project: {proj['name']} (ID: {proj['id']})", ("info",))
+        except Exception as e:
+            logger.error("Error during on_project_changed: %s", e)
 
     @property
     def _state_path(self) -> Path:
