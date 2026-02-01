@@ -37,6 +37,10 @@ Redboar wraps the industry's best tools with a unified UI:
 - **HTML Reports**: Professional, client-ready reports with Executive Summaries and Host/Service details.
 - **Text/HTML Exports**: Quick export of raw tool output.
 
+### Advanced Arsenal
+- **Payload Factory**: GUI wrapper for MSFVenom with auto-IP detection, 20+ payloads, and encoder support.
+- **Project Timeline**: Audit trail showing all project actions, scans, and events.
+
 ## Requirements
 - Linux (Debian/Ubuntu/Kali recommended)
 - Python 3 + Tkinter

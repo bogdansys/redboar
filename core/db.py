@@ -62,6 +62,19 @@ def init_schema(db_path=None):
         FOREIGN KEY(host_id) REFERENCES hosts(id) ON DELETE CASCADE
     )
     ''')
+
+    # Timeline table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS timeline (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL,
+        timestamp TEXT,
+        category TEXT,
+        message TEXT,
+        details TEXT,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+    )
+    ''')
     
     conn.commit()
     conn.close()
