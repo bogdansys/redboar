@@ -99,5 +99,14 @@ def build_command(app_instance):
     if app_instance.nmap_verbose_var.get(): temp_cmd_list.append("-v")
     
     cmd_list.extend(temp_cmd_list)
+
+    # Automatic XML export for parsing
+    import tempfile
+    import os
+    tf = tempfile.NamedTemporaryFile(delete=False, suffix=".xml", prefix="redboar_nmap_")
+    tf.close()
+    app_instance.nmap_xml_output_path = tf.name
+    cmd_list.extend(["-oX", app_instance.nmap_xml_output_path])
+
     cmd_list.append(target)
     return cmd_list
