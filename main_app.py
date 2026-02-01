@@ -32,6 +32,8 @@ from ui import ui_hydra
 from ui import ui_revshell
 from ui import ui_dashboard
 from ui import ui_notes
+from ui import ui_timeline
+from ui import ui_msfvenom
 from ui import ai_ui
 
 from core import state_manager
@@ -40,6 +42,7 @@ from core import graph_engine
 from core import automation_engine
 from core import report_generator
 from core import parsers
+from core import audit
 
 FOUND_EXECUTABLES = {}
 
@@ -443,6 +446,19 @@ class PentestApp:
         self.main_notebook.add(notes_frame, text=' Notes ')
         self.tool_frames["Notes"] = notes_frame
         self.notes_ui_instance = ui_notes.create_ui(notes_frame, self)
+
+        # Timeline Tab
+        timeline_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(timeline_frame, text=' Timeline ')
+        self.tool_frames["Timeline"] = timeline_frame
+        self.timeline_ui_instance = ui_timeline.create_ui(timeline_frame, self)
+
+        # Payloads Tab (MSFVenom)
+        msf_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(msf_frame, text=' Payloads ')
+        self.tool_frames["Payloads"] = msf_frame
+        ui_msfvenom.create_ui(msf_frame, self)
+        self.tool_ui_builders["MSFVenom"] = ui_msfvenom
 
         # AI Assistant Tab
         ai_frame = ttk.Frame(self.main_notebook, padding="10")
@@ -982,10 +998,16 @@ class PentestApp:
             if hasattr(self, 'graph_ui_instance'):
                 self.graph_ui_instance.load_data()
                 
+            # Refresh Timeline
+            if hasattr(self, 'timeline_ui_instance'):
+                self.timeline_ui_instance.load_data()
+                
             # Log to output
             proj = self.state_manager.get_current_project()
             if proj['id']:
                 self.insert_output_line(f"[+] Loaded Project: {proj['name']} (ID: {proj['id']})", ("info",))
+                # Log to audit trail
+                audit.AuditLogger.log(proj['id'], "SYSTEM", f"Project loaded: {proj['name']}")
         except Exception as e:
             logger.error("Error during on_project_changed: %s", e)
 
