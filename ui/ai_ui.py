@@ -9,6 +9,7 @@ from core import ai_client
 from core import ai_planner
 from core import ai_schemas
 from core import ai_storage
+from core import db
 import os
 
 logger = logging.getLogger("redboar")
@@ -63,6 +64,8 @@ def create_ai_tab(parent_frame, app):
 
     ttk.Button(controls, text="Plan Steps", command=lambda: _plan(app)).grid(row=0, column=0, padx=5)
     ttk.Button(controls, text="Run Selected", command=lambda: _run_selected(app)).grid(row=0, column=1, padx=5)
+    ttk.Button(controls, text="Analyze Output Log", command=lambda: _analyze_active_log(app)).grid(row=0, column=2, padx=5)
+    ttk.Button(controls, text="Triage Findings", command=lambda: _triage_findings(app)).grid(row=0, column=3, padx=5)
 
     app.ai_plan = ttk.Treeview(parent_frame, columns=("tool", "params", "why"), show="headings", height=10)
     app.ai_plan.heading("tool", text="Tool/Action")
@@ -165,6 +168,122 @@ def _run_selected(app):
 
         app.update_command_preview()
     messagebox.showinfo("AI", "Selected steps applied to tool tabs. Review and Start when ready.")
+
+
+def _analyze_active_log(app):
+    # Verify API key
+    if not ai_client.is_configured():
+        messagebox.showwarning("AI", "Analysis requires an OpenAI API key. Please configure it above.")
+        return
+
+    # Grab log text
+    if not hasattr(app, "output_text"):
+        messagebox.showerror("Error", "Could not find output log to analyze.")
+        return
+        
+    log_content = app.output_text.get("1.0", "end").strip()
+    if not log_content:
+        messagebox.showinfo("AI", "Output log is empty. Run a tool first.")
+        return
+
+    # Truncate if huge (last 4000 chars roughly)
+    if len(log_content) > 4000:
+        log_content = "...[truncated]...\n" + log_content[-4000:]
+    
+    prompt = (
+        "Analyze the following security tool output. "
+        "Identify any key vulnerabilities, errors, or interesting findings. "
+        "Suggest the next logical step.\n\n"
+        f"Tool Output:\n{log_content}"
+    )
+
+    try:
+        # Show busy cursor
+        app.master.config(cursor="watch")
+        app.master.update()
+        
+        analysis = ai_client.chat_completion(prompt, system="You are an expert offensive security analyst.", max_tokens=600)
+        
+        # Show result in custom window
+        top = tk.Toplevel(app.master)
+        top.title("AI Analysis Result")
+        top.geometry("600x500")
+        
+        txt = tk.Text(top, wrap="word", padx=10, pady=10)
+        txt.pack(fill="both", expand=True)
+        txt.insert("1.0", analysis)
+        txt.config(state="disabled") # Read-only
+        
+        ttk.Button(top, text="Close", command=top.destroy).pack(pady=5)
+        
+    except Exception as e:
+        messagebox.showerror("AI Error", f"Analysis failed: {e}")
+    finally:
+        app.master.config(cursor="")
+
+
+def _triage_findings(app):
+    # Verify API
+    if not ai_client.is_configured():
+        messagebox.showwarning("AI", "Triage requires an OpenAI API key.")
+        return
+
+    # Fetch Data
+    proj_id = app.state_manager.current_project_id
+    if not proj_id:
+        messagebox.showinfo("AI", "No project loaded.")
+        return
+
+    try:
+        conn = db.get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT hosts.ip_address, services.port, services.service_name, services.product, services.version
+            FROM services 
+            JOIN hosts ON services.host_id = hosts.id
+            WHERE hosts.project_id = ? AND services.state = 'open'
+        """, (proj_id,))
+        rows = cur.fetchall()
+        conn.close()
+        
+        if not rows:
+            messagebox.showinfo("AI", "No open services found in database to triage.")
+            return
+            
+        # Format Data
+        data_str = "Open Services:\n"
+        for r in rows:
+            data_str += f"- {r['ip_address']}:{r['port']} ({r['service_name']}) - {r['product']} {r['version']}\n"
+            
+        prompt = (
+            "Review the following discovered services from a penetration test. "
+            "Rank the findings by criticality (High/Medium/Low). "
+            "Identify the most dangerous vectors and suggest specific exploits to check for (e.g. CVEs).\n\n"
+            f"{data_str}"
+        )
+        
+        # Show busy cursor
+        app.master.config(cursor="watch")
+        app.master.update()
+        
+        analysis = ai_client.chat_completion(prompt, system="You are an expert offensive security analyst.", max_tokens=800)
+        
+        # Show result
+        top = tk.Toplevel(app.master)
+        top.title("AI Triage Result")
+        top.geometry("700x600")
+        
+        txt = tk.Text(top, wrap="word", padx=10, pady=10)
+        txt.pack(fill="both", expand=True)
+        txt.insert("1.0", analysis)
+        txt.config(state="disabled")
+        
+        ttk.Button(top, text="Close", command=top.destroy).pack(pady=5)
+        
+    except Exception as e:
+        messagebox.showerror("AI Error", f"Triage failed: {e}")
+    finally:
+        app.master.config(cursor="")
 
 
 def _save_api_key(app):

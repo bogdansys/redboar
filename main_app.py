@@ -26,9 +26,19 @@ from ui import ui_nikto
 from ui import ui_john
 from ui import ui_targets
 from ui import ui_graph
+from ui import ui_nuclei
+from ui import ui_searchsploit
+from ui import ui_hydra
+from ui import ui_revshell
+from ui import ui_dashboard
+from ui import ui_notes
 from ui import ai_ui
 
 from core import state_manager
+from core import parsers
+from core import graph_engine
+from core import automation_engine
+from core import report_generator
 from core import parsers
 
 FOUND_EXECUTABLES = {}
@@ -254,6 +264,8 @@ class PentestApp:
         project_menu.add_command(label="New Project...", command=self.new_project_dialog)
         project_menu.add_command(label="Open Project...", command=self.open_project_dialog)
         project_menu.add_separator()
+        project_menu.add_separator()
+        project_menu.add_command(label="Generate Report (HTML)...", command=self.generate_report_dialog)
         project_menu.add_command(label="Current Project Info", command=self.show_project_info)
 
         view_menu = tk.Menu(self.menubar, tearoff=0)
@@ -358,7 +370,15 @@ class PentestApp:
         self.main_notebook.grid(row=1, column=0, columnspan=2, sticky="new", padx=8, pady=(0,4))
         self.main_notebook.bind("<<NotebookTabChanged>>", self.on_tool_selected)
 
-        self.tool_frames = {}
+        # Dashboard Tab (New First Tab)
+        dash_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(dash_frame, text=' Dashboard ')
+        self.tool_frames["Dashboard"] = dash_frame
+        self.dash_ui_instance = ui_dashboard.create_ui(dash_frame, self)
+
+        self.tool_frames = {} if not hasattr(self, 'tool_frames') else self.tool_frames
+        
+        # Tool Tabs
         tool_tabs_config = [
             ("Gobuster", ui_gobuster.create_ui),
             ("Nmap", ui_nmap.create_ui),
@@ -375,8 +395,8 @@ class PentestApp:
             
             not_found_label = ttk.Label(frame, text=f"{name} executable not found. Please install it or check your PATH.", style="tool_not_found_msg.TLabel")
             setattr(self, f"{name.lower().replace(' ', '_').replace('-', '_')}_not_found_label", not_found_label)
-
-        # Targets Tab (New)
+        
+        # Re-adding Targets tab
         targets_frame = ttk.Frame(self.main_notebook, padding="10")
         self.main_notebook.add(targets_frame, text=' Targets ')
         # Store it so we can refresh it later
@@ -389,6 +409,40 @@ class PentestApp:
         self.tool_frames["Graph"] = graph_frame
         # We need to keep a ref to the graph UI instance to call load_data if we want auto-updates
         self.graph_ui_instance = ui_graph.create_ui(graph_frame, self)
+
+        # Nuclei Tab
+        nuclei_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(nuclei_frame, text=' Nuclei ')
+        self.tool_frames["Nuclei"] = nuclei_frame
+        ui_nuclei.create_ui(nuclei_frame, self)
+        self.tool_ui_builders["Nuclei"] = ui_nuclei
+
+        # SearchSploit Tab
+        search_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(search_frame, text=' SearchSploit ')
+        self.tool_frames["SearchSploit"] = search_frame
+        ui_searchsploit.create_ui(search_frame, self)
+        self.tool_ui_builders["SearchSploit"] = ui_searchsploit
+
+        # Hydra Tab
+        hydra_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(hydra_frame, text=' Hydra ')
+        self.tool_frames["Hydra"] = hydra_frame
+        ui_hydra.create_ui(hydra_frame, self)
+        self.tool_ui_builders["Hydra"] = ui_hydra
+
+        # RevShell Tab
+        rev_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(rev_frame, text=' RevShell ')
+        self.tool_frames["RevShell"] = rev_frame
+        ui_revshell.create_ui(rev_frame, self)
+        self.tool_ui_builders["RevShell"] = ui_revshell
+
+        # Notes Tab
+        notes_frame = ttk.Frame(self.main_notebook, padding="10")
+        self.main_notebook.add(notes_frame, text=' Notes ')
+        self.tool_frames["Notes"] = notes_frame
+        self.notes_ui_instance = ui_notes.create_ui(notes_frame, self)
 
         # AI Assistant Tab
         ai_frame = ttk.Frame(self.main_notebook, padding="10")
