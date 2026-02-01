@@ -920,6 +920,7 @@ class PentestApp:
             try:
                 self.state_manager.create_project(name)
                 self.title_update()
+                self.on_project_changed()
                 messagebox.showinfo("Project", f"Created and switched to project: {name}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to create project: {e}")
@@ -946,6 +947,7 @@ class PentestApp:
                 proj = projects[idx]
                 self.state_manager.load_project(proj['id'])
                 self.title_update()
+                self.on_project_changed()
                 top.destroy()
                 messagebox.showinfo("Project", f"Switched to project: {proj['name']}")
                 
@@ -964,6 +966,28 @@ class PentestApp:
          if proj['name']:
              title += f" - [{proj['name']}]"
          self.master.title(title)
+
+    def on_project_changed(self):
+        """Called when a project is created or loaded."""
+        try:
+            # Refresh Dashboard
+            if hasattr(self, 'dash_ui_instance'):
+                self.dash_ui_instance.refresh_stats()
+            
+            # Load Notes
+            if hasattr(self, 'notes_ui_instance'):
+                self.notes_ui_instance.load_notes()
+                
+            # Refresh Graph
+            if hasattr(self, 'graph_ui_instance'):
+                self.graph_ui_instance.load_data()
+                
+            # Log to output
+            proj = self.state_manager.get_current_project()
+            if proj['id']:
+                self.insert_output_line(f"[+] Loaded Project: {proj['name']} (ID: {proj['id']})", ("info",))
+        except Exception as e:
+            logger.error("Error during on_project_changed: %s", e)
 
     @property
     def _state_path(self) -> Path:
