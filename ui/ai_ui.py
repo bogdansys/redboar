@@ -5,10 +5,10 @@ import json
 import logging
 from typing import Any, Dict, List
 
-import ai_client
-import ai_planner
-import ai_schemas
-import ai_storage
+from core import ai_client
+from core import ai_planner
+from core import ai_schemas
+from core import ai_storage
 import os
 
 logger = logging.getLogger("redboar")

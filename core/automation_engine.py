@@ -1,6 +1,6 @@
 import logging
-import workflow_rules
-import db
+from . import workflow_rules
+from . import db
 
 logger = logging.getLogger("redboar")
 

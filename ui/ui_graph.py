@@ -3,8 +3,10 @@ from tkinter import ttk
 import logging
 import random
 import math
-import db
-import graph_engine
+from typing import Any, Dict, List
+
+from core import db
+from core import graph_engine
 
 logger = logging.getLogger("redboar")
 

@@ -1,6 +1,8 @@
+import os
+import sqlite3
 import logging
 from datetime import datetime
-import db
+from . import db
 
 logger = logging.getLogger("redboar")
 

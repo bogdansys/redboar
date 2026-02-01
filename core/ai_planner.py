@@ -3,9 +3,9 @@ from typing import List, Dict, Any
 import json
 import logging
 
-import ai_client
-import ai_schemas
-import ai_redaction
+from . import ai_client
+from . import ai_schemas
+from . import ai_redaction
 
 logger = logging.getLogger("redboar")
 

@@ -18,18 +18,18 @@ from pathlib import Path
 from shutil import which
 import math
 
-import config
-import ui_gobuster
-import ui_nmap
-import ui_sqlmap
-import ui_nikto
-import ui_john
-import ui_targets
-import ui_graph
-import ai_ui
+from core import config
+from ui import ui_gobuster
+from ui import ui_nmap
+from ui import ui_sqlmap
+from ui import ui_nikto
+from ui import ui_john
+from ui import ui_targets
+from ui import ui_graph
+from ui import ai_ui
 
-import state_manager
-import parsers
+from core import state_manager
+from core import parsers
 
 FOUND_EXECUTABLES = {}
 
@@ -596,10 +596,12 @@ class PentestApp:
                     if self.proc_thread_tool_name == "Nmap" and hasattr(self, 'nmap_xml_output_path') and self.nmap_xml_output_path:
                          if os.path.exists(self.nmap_xml_output_path):
                              try:
-                                 current_proj = self.state_manager.get_current_project()
-                                 if current_proj['id']:
-                                     self.insert_output_line(f"\n[+] Parsing Nmap results into Project: {current_proj['name']}...", ("info",))
-                                     parsers.parse_nmap_xml(self.nmap_xml_output_path, current_proj['id'])
+                                 project_info = self.state_manager.get_current_project()
+                                 xml_output_path = self.nmap_xml_output_path
+                                 if project_info and project_info['id']:
+                                     from core import parsers # Lazy import
+                                     self.insert_output_line(f"\n[+] Parsing Nmap results into Project: {project_info['name']}...", ("info",))
+                                     parsers.parse_nmap_xml(xml_output_path, project_info['id'])
                                      self.insert_output_line(f"[+] Parsing complete.", ("success",))
                                      # Notify specific tab observer if exists (Phase 2 UI update)
                                  else:

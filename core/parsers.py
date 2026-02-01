@@ -1,6 +1,6 @@
 import xml.etree.ElementTree as ET
 import logging
-import db
+from . import db
 
 logger = logging.getLogger("redboar")
 

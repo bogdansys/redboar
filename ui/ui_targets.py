@@ -1,8 +1,8 @@
 import tkinter as tk
 from tkinter import ttk
 import logging
-import db
-import automation_engine
+from core import db
+from core import automation_engine
 from tkinter import simpledialog, messagebox
 
 logger = logging.getLogger("redboar")
