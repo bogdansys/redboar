@@ -49,7 +49,7 @@ Redboar wraps the industry's best tools with a unified UI:
 ### Installation
 1.  **Clone the repo:**
     ```bash
-    git clone https://github.com/yourusername/redboar.git
+    git clone https://github.com/bogdansys/redboar
     cd redboar
     ```
 2.  **Install Python dependencies:**
